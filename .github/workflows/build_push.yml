@@ -3,7 +3,8 @@ name: CI
 on:
   push:
     branches:
-      - main
+      - '**'
+      - '!repo'
     paths:
       - '**'
       - '!**.md'
@@ -54,7 +55,11 @@ jobs:
         env:
           FORCE_BUILD_ALL: ${{ github.event.inputs.build_all || 'false' }}
         run: |
-          python ./.github/scripts/generate-build-matrices.py "$NX_BASE" Release
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            python ./.github/scripts/generate-build-matrices.py "$NX_BASE" Release
+          else
+            python ./.github/scripts/generate-build-matrices.py origin/main Release
+          fi
 
   build:
     name: Build extensions (${{ matrix.chunk.number }})
@@ -108,7 +113,7 @@ jobs:
   publish:
     name: Publish extension repo
     needs: [prepare, build]
-    if: "github.repository == 'AhmadNaruto/mihon-extension'"
+    if: "github.repository == 'AhmadNaruto/mihon-extension' && github.ref_name == 'main'"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
