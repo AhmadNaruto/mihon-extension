@@ -91,10 +91,13 @@ jobs:
           )
           
           if [ -z "$PR_EXISTS" ]; then
-            gh pr create --title "Daily Upstream Sync" --body "$FULL_BODY" --base main --head $BRANCH_NAME
-            echo "PR successfully created!"
+            gh pr create --title "Daily Upstream Sync" --body "$FULL_BODY" --base main --head $BRANCH_NAME && echo "PR successfully created!" || {
+              echo "WARNING: Failed to automatically create Pull Request via GitHub Actions."
+              echo "This is usually because the 'Allow GitHub Actions to create and approve pull requests' permission is disabled in your repository settings (Settings > Actions > General > Workflow permissions)."
+              echo "However, the sync branch '$BRANCH_NAME' has been successfully updated and pushed. You can create the Pull Request manually on GitHub: https://github.com/${{ github.repository }}/pull/new/$BRANCH_NAME"
+            }
           else
             echo "PR already exists (PR #$PR_EXISTS). Pushed updates to $BRANCH_NAME branch."
             # Optional: update the PR body
-            gh pr edit $PR_EXISTS --body "$FULL_BODY"
+            gh pr edit $PR_EXISTS --body "$FULL_BODY" || echo "WARNING: Failed to update PR body, but the branch was successfully updated."
           fi
