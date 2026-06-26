@@ -73,9 +73,10 @@ class MangaDetailDto(
 
 @Serializable
 class ChapterDto(
-    private val slug: String,
+    val slug: String,
     private val title: String,
     private val date: Long? = null,
+    @SerialName("chapter_token") val chapterToken: String? = null,
 ) {
     fun toSChapter(source: String, mangaSlug: String) = SChapter.create().apply {
         url = "$source/$mangaSlug/$slug"
