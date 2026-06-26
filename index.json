@@ -1,0 +1,53 @@
+{
+  "name": "Keiyoushi",
+  "badgeLabel": "KEI",
+  "signingKey": "9add655a78e96c4ec7a53ef89dccb557cb5d767489fac5e785d671a5a75d4da2",
+  "contact": {
+    "website": "https://keiyoushi.github.io",
+    "discord": "https://discord.gg/3FbCpdKbdY"
+  },
+  "extensionList": {
+    "extensions": [
+      {
+        "name": "XGMN",
+        "packageName": "eu.kanade.tachiyomi.extension.all.xgmn",
+        "resources": {
+          "apkUrl": "https://raw.githubusercontent.com/AhmadNaruto/mihon-extension/refs/heads/repo/apk/tachiyomi-all.xgmn-v1.4.3.apk",
+          "iconUrl": "https://raw.githubusercontent.com/AhmadNaruto/mihon-extension/refs/heads/repo/icon/eu.kanade.tachiyomi.extension.all.xgmn.png"
+        },
+        "extensionLib": "1.4",
+        "versionCode": "3",
+        "versionName": "1.4.3",
+        "contentWarning": "CONTENT_WARNING_NSFW",
+        "sources": [
+          {
+            "id": "2870097240566002663",
+            "name": "\u6027\u611f\u7f8e\u5973",
+            "language": "all",
+            "homeUrl": "http://xgmn8.vip"
+          }
+        ]
+      },
+      {
+        "name": "ShiroDoujin",
+        "packageName": "eu.kanade.tachiyomi.extension.id.shirodoujin",
+        "resources": {
+          "apkUrl": "https://raw.githubusercontent.com/AhmadNaruto/mihon-extension/refs/heads/repo/apk/tachiyomi-id.shirodoujin-v1.4.3.apk",
+          "iconUrl": "https://raw.githubusercontent.com/AhmadNaruto/mihon-extension/refs/heads/repo/icon/eu.kanade.tachiyomi.extension.id.shirodoujin.png"
+        },
+        "extensionLib": "1.4",
+        "versionCode": "3",
+        "versionName": "1.4.3",
+        "contentWarning": "CONTENT_WARNING_NSFW",
+        "sources": [
+          {
+            "id": "8468586261171749665",
+            "name": "Shiro Doujin",
+            "language": "id",
+            "homeUrl": "https://shirodoujin.com"
+          }
+        ]
+      }
+    ]
+  }
+}
