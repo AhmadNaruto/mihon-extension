@@ -1,0 +1,100 @@
+name: Daily Upstream Sync
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Upstream Sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Checkout upstream repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: keiyoushi/extensions-source
+          path: upstream
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.2.0
+        with:
+          python-version: '3.x'
+
+      - name: Run synchronization script
+        run: |
+          python .github/scripts/sync-upstream.py
+
+      - name: Clean upstream folder
+        run: |
+          rm -rf upstream
+
+      - name: Create Pull Request if changes detected
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -f sync_status.txt ]; then
+            echo "sync_status.txt not found!"
+            exit 1
+          fi
+          
+          STATUS=$(head -n 1 sync_status.txt)
+          if [ "$STATUS" = "no_changes" ]; then
+            echo "No changes detected. Skipping PR creation."
+            exit 0
+          fi
+          
+          echo "Changes detected! Preparing PR..."
+          
+          # Configure Git
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          BRANCH_NAME="upstream-sync-auto"
+          
+          # Create and switch to sync branch
+          git checkout -b $BRANCH_NAME || (git checkout $BRANCH_NAME && git reset --hard origin/main)
+          
+          # Add changes
+          git add .
+          git commit -m "Sync matching extensions and library components with upstream"
+          
+          # Push changes (force-push to update existing PR branch if open)
+          git push origin $BRANCH_NAME --force
+          
+          # Check if PR already exists
+          PR_EXISTS=$(gh pr list --state open --head $BRANCH_NAME --json number -q '.[0].number')
+          
+          # Read details of changes
+          PR_BODY=$(cat sync_status.txt | sed '1d')
+          
+          FULL_BODY=$(cat <<EOF
+          This is an automated pull request created by the Daily Upstream Sync workflow.
+          
+          It checks the upstream repository [keiyoushi/extensions-source](https://github.com/keiyoushi/extensions-source) for changes to the active extensions and shared library components in this project, and brings them in.
+          
+          ### Detected Changes:
+          $PR_BODY
+          
+          Please review the diff before merging.
+          EOF
+          )
+          
+          if [ -z "$PR_EXISTS" ]; then
+            gh pr create --title "Daily Upstream Sync" --body "$FULL_BODY" --base main --head $BRANCH_NAME
+            echo "PR successfully created!"
+          else
+            echo "PR already exists (PR #$PR_EXISTS). Pushed updates to $BRANCH_NAME branch."
+            # Optional: update the PR body
+            gh pr edit $PR_EXISTS --body "$FULL_BODY"
+          fi
