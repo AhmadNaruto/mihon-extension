@@ -11,6 +11,12 @@ on:
       - '.github/scripts/**'
       - '.github/workflows/build_push.yml'
   workflow_dispatch:
+    inputs:
+      build_all:
+        description: 'Build all extensions'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -45,6 +51,8 @@ jobs:
 
       - id: generate-matrices
         name: Create output matrices
+        env:
+          FORCE_BUILD_ALL: ${{ github.event.inputs.build_all || 'false' }}
         run: |
           python ./.github/scripts/generate-build-matrices.py "$NX_BASE" Release
 
