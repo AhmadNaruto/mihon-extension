@@ -1,0 +1,7 @@
+# List of paths to exclude from daily upstream synchronization.
+# Add the relative path of any extension or shared directory you don't want to overwrite.
+
+src/id/comicaso
+src/id/mihentai
+src/id/shirodoujin
+src/all/xgmn

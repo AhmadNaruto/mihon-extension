@@ -29,10 +29,25 @@ if os.path.exists(src_dir):
                 if os.path.isdir(ext_path):
                     active_extensions.append((lang, ext))
 
+# Read .syncignore
+ignored_paths = set()
+if os.path.exists(".syncignore"):
+    with open(".syncignore", "r") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                ignored_paths.add(os.path.normpath(line))
+
+print(f"Loaded ignored paths: {ignored_paths}")
 print(f"Found {len(active_extensions)} active extensions in our repository.")
 
 # Copy shared components
 for p in paths_to_sync_always:
+    normalized_p = os.path.normpath(p)
+    if normalized_p in ignored_paths:
+        print(f"Skipping ignored shared component: {p}")
+        continue
+        
     upstream_path = os.path.join(upstream_dir, p)
     if os.path.exists(upstream_path):
         print(f"Syncing shared component: {p}")
@@ -52,6 +67,11 @@ for p in paths_to_sync_always:
 # Copy active extensions
 for lang, ext in active_extensions:
     local_ext_path = os.path.join(src_dir, lang, ext)
+    normalized_ext_path = os.path.normpath(local_ext_path)
+    if normalized_ext_path in ignored_paths:
+        print(f"Skipping ignored extension: {lang}/{ext}")
+        continue
+        
     upstream_ext_path = os.path.join(upstream_dir, src_dir, lang, ext)
     if os.path.exists(upstream_ext_path):
         print(f"Syncing extension: {lang}/{ext}")
