@@ -1,0 +1,10 @@
+ext {
+    extName = 'APKOMIK'
+    extClass = '.Apkomik'
+    themePkg = 'mangathemesia'
+    baseUrl = 'https://01.apkomik.com'
+    overrideVersionCode = 5
+    isNsfw = false
+}
+
+apply plugin: "kei.plugins.extension.legacy"

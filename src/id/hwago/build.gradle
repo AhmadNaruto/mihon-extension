@@ -1,0 +1,10 @@
+ext {
+    extName = 'Hwago'
+    extClass = '.Hwago'
+    themePkg = 'madara'
+    baseUrl = 'https://01.hwago.xyz'
+    overrideVersionCode = 4
+    isNsfw = true
+}
+
+apply plugin: "kei.plugins.extension.legacy"

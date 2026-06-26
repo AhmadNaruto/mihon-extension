@@ -1,0 +1,10 @@
+ext {
+    extName = 'Komik Station'
+    extClass = '.KomikStation'
+    themePkg = 'mangathemesia'
+    baseUrl = 'https://komikstation.org'
+    overrideVersionCode = 7
+    isNsfw = false
+}
+
+apply plugin: "kei.plugins.extension.legacy"
