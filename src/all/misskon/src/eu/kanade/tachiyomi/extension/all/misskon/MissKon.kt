@@ -105,10 +105,15 @@ class MissKon : HttpSource() {
             }
         val dateUpload = FULL_DATE_FORMAT.tryParse(dateUploadStr)
         val maxPage = doc.select("div.page-link:first-of-type a.post-page-numbers").last()?.text()?.toInt() ?: 1
-        val basePageUrl = response.request.url.toString()
+        val basePageUrl = response.request.url.toString().removeSuffix("/")
         return (maxPage downTo 1).map { page ->
+            val url = if (page == 1) {
+                "$basePageUrl/"
+            } else {
+                "$basePageUrl/$page/"
+            }
             SChapter.create().apply {
-                setUrlWithoutDomain("$basePageUrl/$page")
+                setUrlWithoutDomain(url)
                 name = "Page $page"
                 date_upload = dateUpload
             }
@@ -131,7 +136,11 @@ class MissKon : HttpSource() {
     // region Pages
     override fun pageListParse(response: Response): List<Page> = response.asJsoup()
         .select("div.post-inner > div.entry > p > img")
-        .mapIndexed { i, imgEl -> Page(i, imageUrl = imgEl.absUrl("data-src")) }
+        .mapNotNull { imgEl ->
+            val url = imgEl.absUrl("data-src").ifEmpty { imgEl.absUrl("src") }
+            url.takeIf { it.startsWith("http") }?.replace("http://", "https://")
+        }
+        .mapIndexed { i, url -> Page(i, imageUrl = url) }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
     // endregion
