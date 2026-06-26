@@ -40,13 +40,9 @@ class Comicaso :
         .rateLimit(4)
         .build()
 
-    private val defaultUserAgent by lazy {
-        super.headersBuilder().build()["User-Agent"]
-    }
-
     // Android Chrome UA is the default fallback used by Mihon's WebView (for
     // both solving this site's Cloudflare challenge and the Google sign-in
-    // step). It is NOT sent on background API calls — see authInterceptor.
+    // step).
     // If either Cloudflare or Google starts rejecting this default for a
     // given user, they can override it via Settings > Random user agent
     // instead of requiring an extension update.
@@ -58,9 +54,7 @@ class Comicaso :
         )
 
     private fun authInterceptor(chain: Interceptor.Chain): Response {
-        val request = chain.request().newBuilder()
-            .apply { defaultUserAgent?.let { header("User-Agent", it) } }
-            .build()
+        val request = chain.request()
 
         val response = chain.proceed(request)
         if (response.code == 403) {
