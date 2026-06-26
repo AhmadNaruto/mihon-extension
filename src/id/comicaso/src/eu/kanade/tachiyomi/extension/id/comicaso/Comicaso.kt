@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.extension.id.comicaso
 
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -193,6 +194,29 @@ class Comicaso :
     }
 
     // =============================== Pages ===============================
+
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+        val segments = chapter.urlSegments()
+        val source = segments.getOrNull(0) ?: "all"
+        val mangaSlug = segments.getOrNull(1) ?: ""
+        val chapterSlug = segments.getOrNull(2) ?: ""
+
+        val detailsRequest = GET("$baseUrl/api/manga.php?source=$source&slug=$mangaSlug&platform=web", headers)
+
+        return client.newCall(detailsRequest).asObservableSuccess().flatMap { response ->
+            val details = response.parseAs<MangaDetailResponseDto>()
+            val chapterToken = details.data.chapters?.find { it.slug == chapterSlug }?.chapterToken
+                ?: throw IOException("Token chapter tidak ditemukan. Silakan refresh halaman.")
+
+            val pagesRequest = GET(
+                "$baseUrl/api/chapter.php?source=$source&manga=$mangaSlug&chapter=$chapterSlug&platform=web&token=$chapterToken",
+                headers
+            )
+            client.newCall(pagesRequest).asObservableSuccess().map { pageResponse ->
+                pageListParse(pageResponse)
+            }
+        }
+    }
 
     override fun pageListRequest(chapter: SChapter): Request {
         val segments = chapter.urlSegments()
