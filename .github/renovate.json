@@ -1,32 +1,39 @@
 {
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
   ],
+  "dependencyDashboard": true,
+  "labels": ["dependencies"],
   "schedule": ["on sunday"],
-  "includePaths": [
-    "buildSrc/gradle/**",
-    "buildSrc/*.gradle.kts",
-    "gradle/**",
-    "*.gradle.kts",
-    ".github/**"
-  ],
-  "ignoreDeps": ["keiyoushi/issue-moderator-action"],
   "packageRules": [
     {
       "matchManagers": ["github-actions"],
-      "groupName": "{{manager}} dependencies"
+      "groupName": "GitHub Actions dependencies"
     },
     {
       "matchManagers": ["gradle"],
-      "enabled": false
+      "enabled": true
+    },
+    {
+      "matchPackageNames": ["org.jetbrains.kotlin/**", "org.jetbrains.kotlinx/**"],
+      "groupName": "Kotlin dependencies"
+    },
+    {
+      "matchPackageNames": ["com.squareup.okhttp3/**"],
+      "groupName": "OkHttp dependencies"
+    },
+    {
+      "matchPackageNames": ["org.jsoup:jsoup"],
+      "groupName": "Jsoup dependencies"
     },
     {
       "matchPackageNames": [
         "com.android.tools.build:gradle",
         "gradle"
       ],
-      "draftPR": true,
-      "enabled": true
+      "groupName": "Android Gradle Plugin & Gradle Wrapper",
+      "draftPR": true
     }
   ]
 }
