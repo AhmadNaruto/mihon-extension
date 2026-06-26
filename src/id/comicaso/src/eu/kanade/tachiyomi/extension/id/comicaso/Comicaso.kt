@@ -210,7 +210,7 @@ class Comicaso :
 
             val pagesRequest = GET(
                 "$baseUrl/api/chapter.php?source=$source&manga=$mangaSlug&chapter=$chapterSlug&platform=web&token=$chapterToken",
-                headers
+                headers,
             )
             client.newCall(pagesRequest).asObservableSuccess().map { pageResponse ->
                 pageListParse(pageResponse)
