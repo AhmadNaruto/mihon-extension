@@ -75,8 +75,8 @@ class DoujinDesu :
 
     override fun popularMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
-        val mangas = document.select("#archives > div.entries > article").map(::parseMangaFromElement)
-        val hasNextPage = document.selectFirst("nav.pagination > ul > li.last > a") != null
+        val mangas = document.select("div.listupd div.bs").map(::parseMangaFromElement)
+        val hasNextPage = document.selectFirst("div.pagination a.next") != null
         return MangasPage(mangas, hasNextPage)
     }
 
@@ -86,8 +86,8 @@ class DoujinDesu :
 
     override fun latestUpdatesParse(response: Response): MangasPage {
         val document = response.asJsoup()
-        val mangas = document.select("#archives > div.entries > article").map(::parseMangaFromElement)
-        val hasNextPage = document.selectFirst("nav.pagination > ul > li.last > a") != null
+        val mangas = document.select("div.listupd div.bs").map(::parseMangaFromElement)
+        val hasNextPage = document.selectFirst("div.pagination a.next") != null
         return MangasPage(mangas, hasNextPage)
     }
 
@@ -116,8 +116,8 @@ class DoujinDesu :
 
     override fun searchMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
-        val mangas = document.select("#archives > div.entries > article").map(::parseMangaFromElement)
-        val hasNextPage = document.selectFirst("nav.pagination > ul > li.last > a") != null
+        val mangas = document.select("div.listupd div.bs").map(::parseMangaFromElement)
+        val hasNextPage = document.selectFirst("div.pagination a.next") != null
         return MangasPage(mangas, hasNextPage)
     }
 
