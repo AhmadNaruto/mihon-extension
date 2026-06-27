@@ -16,6 +16,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.lib.cookieinterceptor.CookieInterceptor
 import keiyoushi.lib.randomua.addRandomUAPreference
 import keiyoushi.lib.randomua.setRandomUserAgent
 import keiyoushi.utils.firstInstanceOrNull
@@ -23,7 +24,6 @@ import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.tryParse
 import okhttp3.FormBody
 import okhttp3.Headers
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
@@ -39,76 +39,14 @@ class DoujinDesu :
 
     // Information : DoujinDesu use EastManga WordPress Theme
     override val name = "Doujindesu"
-
-    private var resolvedUrl: String? = null
-
-    override val baseUrl: String
-        get() {
-            resolvedUrl?.let { return it }
-
-            val prefUrl = preferences.getString(PREF_DOMAIN_KEY, null)
-            if (prefUrl != null && prefUrl != PREF_DOMAIN_DEFAULT) {
-                return prefUrl
-            }
-
-            if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-                return PREF_DOMAIN_DEFAULT
-            }
-
-            synchronized(this) {
-                resolvedUrl?.let { return it }
-                try {
-                    val client = okhttp3.OkHttpClient()
-                    val request = okhttp3.Request.Builder()
-                        .url("https://doujindesu.cv")
-                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                        .build()
-                    client.newCall(request).execute().use { response ->
-                        if (response.isSuccessful) {
-                            val document = Jsoup.parse(response.body.string(), "https://doujindesu.cv")
-                            val newUrl = document.selectFirst("a.btn")?.attr("abs:href")?.removeSuffix("/")
-                            if (!newUrl.isNullOrEmpty() && newUrl.startsWith("http")) {
-                                resolvedUrl = newUrl
-                                return newUrl
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    // ignore
-                }
-                return PREF_DOMAIN_DEFAULT
-            }
-        }
-
+    override val baseUrl by lazy { preferences.getString(PREF_DOMAIN_KEY, PREF_DOMAIN_DEFAULT)!! }
     override val lang = "id"
     override val supportsLatest = true
 
     override val client = super.client.newBuilder()
-        .addNetworkInterceptor { chain ->
-            val request = chain.request()
-            val host = baseUrl.toHttpUrl().host
-            if (!request.url.host.endsWith(host)) return@addNetworkInterceptor chain.proceed(request)
-
-            val cookieManager = android.webkit.CookieManager.getInstance()
-            val targetCookieName = "sec_v_session"
-            val targetCookieValue = "verified_human_0000000000000"
-
-            val url = "https://$host/"
-            try {
-                cookieManager.setCookie(url, "$targetCookieName=$targetCookieValue; Domain=$host; Path=/")
-            } catch (_: Exception) {}
-
-            val cookieList = request.header("Cookie")?.split("; ") ?: emptyList()
-            if (cookieList.any { it.startsWith("$targetCookieName=") }) {
-                return@addNetworkInterceptor chain.proceed(request)
-            }
-
-            val newCookie = (cookieList + "$targetCookieName=$targetCookieValue").joinToString("; ")
-            val newRequest = request.newBuilder()
-                .header("Cookie", newCookie)
-                .build()
-            chain.proceed(newRequest)
-        }
+        // If this cookie name isn't present, ch.php causes a 304 Set-Cookie of it and then redirection back to /
+        // No value validation presently, so set the hex part to 0s.
+        .addNetworkInterceptor(CookieInterceptor(DOMAIN, "sec_v_session" to "verified_human_0000000000000"))
         .build()
 
     private val preferences: SharedPreferences by getPreferencesLazy()
