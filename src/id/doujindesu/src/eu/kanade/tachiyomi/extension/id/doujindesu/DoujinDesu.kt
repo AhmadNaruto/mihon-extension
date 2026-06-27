@@ -42,7 +42,7 @@ class DoujinDesu :
         .addNetworkInterceptor(CookieInterceptor(DOMAIN, "sec_v_session" to "verified_human_0000000000000"))
         .build()
 
-    private val dateFormat = SimpleDateFormat("EEEE, dd MMMM yyyy", Locale("id"))
+    private val dateFormat = SimpleDateFormat("dd MMMM yyyy", Locale("id"))
 
     private fun parseStatus(status: String) = when {
         status.lowercase(Locale.US).contains("publishing") -> SManga.ONGOING
@@ -272,13 +272,14 @@ class DoujinDesu :
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val document = response.asJsoup()
-        return document.select("#chapter_list li").map { element ->
+        return document.select("div#chapterlist ul li").map { element ->
             SChapter.create().apply {
-                val eps = element.selectFirst("div.epsright chapter")?.text()
-                chapter_number = getNumberFromString(eps)
-                date_upload = dateFormat.tryParse(element.selectFirst("div.epsleft > span.date")?.text())
-                name = "Chapter $eps"
-                element.selectFirst("div.epsleft > span.lchx > a")?.attr("abs:href")?.let {
+                val aElement = element.selectFirst("a")
+                val eps = aElement?.selectFirst("span.chapternum")?.text() ?: ""
+                name = eps.ifEmpty { "Chapter" }
+                chapter_number = element.attr("data-num").toFloatOrNull() ?: getNumberFromString(eps)
+                date_upload = dateFormat.tryParse(aElement?.selectFirst("span.chapterdate")?.text())
+                aElement?.attr("abs:href")?.let {
                     setUrlWithoutDomain(it)
                 }
             }
