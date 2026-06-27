@@ -1,10 +1,6 @@
 package eu.kanade.tachiyomi.extension.id.doujindesu
 
-import android.content.SharedPreferences
-import android.widget.Toast
-import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.AppInfo
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -20,7 +16,6 @@ import keiyoushi.lib.cookieinterceptor.CookieInterceptor
 import keiyoushi.lib.randomua.addRandomUAPreference
 import keiyoushi.lib.randomua.setRandomUserAgent
 import keiyoushi.utils.firstInstanceOrNull
-import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.tryParse
 import okhttp3.FormBody
 import okhttp3.Headers
@@ -39,7 +34,7 @@ class DoujinDesu :
 
     // Information : DoujinDesu use EastManga WordPress Theme
     override val name = "Doujindesu"
-    override val baseUrl by lazy { preferences.getString(PREF_DOMAIN_KEY, PREF_DOMAIN_DEFAULT)!! }
+    override val baseUrl = "https://$DOMAIN"
     override val lang = "id"
     override val supportsLatest = true
 
@@ -48,8 +43,6 @@ class DoujinDesu :
         // No value validation presently, so set the hex part to 0s.
         .addNetworkInterceptor(CookieInterceptor(DOMAIN, "sec_v_session" to "verified_human_0000000000000"))
         .build()
-
-    private val preferences: SharedPreferences by getPreferencesLazy()
 
     private val dateFormat = SimpleDateFormat("EEEE, dd MMMM yyyy", Locale("id"))
 
@@ -326,30 +319,12 @@ class DoujinDesu :
     }
 
     companion object {
-        private val PREF_DOMAIN_KEY = "preferred_domain_name_v${AppInfo.getVersionName()}"
-        private const val PREF_DOMAIN_TITLE = "Mengganti BaseUrl"
-        private const val PREF_DOMAIN_DEFAULT = "https://$DOMAIN"
-        private const val PREF_DOMAIN_SUMMARY = "Mengganti domain default dengan domain yang berbeda"
-
         private val chapterListRegex = Regex("""\d+[-–]?\d*\..+<br>""", RegexOption.IGNORE_CASE)
         private val htmlTagRegex = Regex("<[^>]*>")
         private val chapterPrefixRegex = Regex("""^\d+(-\d+)?\.\s*.*""")
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        EditTextPreference(screen.context).apply {
-            key = PREF_DOMAIN_KEY
-            title = PREF_DOMAIN_TITLE
-            dialogTitle = PREF_DOMAIN_TITLE
-            summary = PREF_DOMAIN_SUMMARY
-            dialogMessage = "Default: $PREF_DOMAIN_DEFAULT"
-            setDefaultValue(PREF_DOMAIN_DEFAULT)
-
-            setOnPreferenceChangeListener { _, _ ->
-                Toast.makeText(screen.context, "Mulai ulang aplikasi untuk menerapkan pengaturan baru.", Toast.LENGTH_LONG).show()
-                true
-            }
-        }.also(screen::addPreference)
         screen.addRandomUAPreference()
     }
 }
