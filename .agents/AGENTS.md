@@ -2,7 +2,8 @@
 
 ## Rules
 - **Branch Management**: Setiap commit harus selalu dilakukan di branch `main` (kecuali diperintahkan lain).
-- **Gradle Task Execution**: Jangan jalankan gradlew (never run `./gradlew` or `./gradlew.bat` commands).
+- **Formatting**: Sebelum commit file `.kt` atau `.kts`, selalu format dengan aturan `spotlessApply` (jalankan `./gradlew spotlessApply`).
+- **Gradle Task Execution**: Jangan jalankan gradlew (never run `./gradlew` or `./gradlew.bat` commands) kecuali untuk memformat kode menggunakan `./gradlew spotlessApply`.
 
 ---
 
