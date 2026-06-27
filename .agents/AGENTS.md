@@ -1,7 +1,7 @@
 # Workspace Rules & Architecture Guide
 
 ## Rules
-- **Branch Management**: Setiap perubahan harus di komit di branch masing-masing (every change must be committed on its respective branch). Do not commit to `main` directly.
+- **Branch Management**: Setiap commit harus selalu dilakukan di branch `main` (kecuali diperintahkan lain).
 - **Gradle Task Execution**: Jangan jalankan gradlew (never run `./gradlew` or `./gradlew.bat` commands).
 
 ---
