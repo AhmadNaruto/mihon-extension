@@ -3,6 +3,7 @@
 ## Rules
 - **Branch Management**: Setiap commit harus selalu dilakukan di branch `main` (kecuali diperintahkan lain).
 - **Formatting**: Sebelum commit atau saat mengedit file `.kt` atau `.kts`, pastikan kode mematuhi aturan standar ktlint/spotless secara manual (4 spasi indentasi, tanpa trailing whitespace, akhiri dengan single empty newline, import alfabetis & tanpa wildcard, penempatan spasi & kurung kurawal yang benar). Sebelum commit, selalu jalankan pemformatan otomatis dengan `./gradlew spotlessApply -PspotlessFiles="..." --no-daemon --offline --configuration-cache`.
+- **Version Bump & Commit Amend**: Jika user mengatakan `"- [nama-ekstensi] selesai dan berfungsi"` (misal: `- doujindesu selesai dan berfungsi`), naikkan `extVersionCode` sebesar 1 di `build.gradle` milik ekstensi tersebut, lalu lakukan `git commit --amend` (gabungkan perubahan versi ke commit terakhir ekstensi tersebut).
 - **Gradle Task Execution**: Jangan jalankan gradlew (never run `./gradlew` or `./gradlew.bat` commands) kecuali untuk memformat kode menggunakan `./gradlew spotlessApply`.
 
 ---
