@@ -2,7 +2,6 @@ package eu.kanade.tachiyomi.extension.id.doujindesu
 
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -17,7 +16,6 @@ import keiyoushi.lib.randomua.addRandomUAPreference
 import keiyoushi.lib.randomua.setRandomUserAgent
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.tryParse
-import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.Request
 import okhttp3.Response
@@ -306,15 +304,22 @@ class DoujinDesu :
 
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
-        val id = document.selectFirst("#reader")?.attr("data-id") ?: return emptyList()
-        val body = FormBody.Builder()
-            .add("id", id)
-            .build()
+        val noscript = document.selectFirst("div#readerarea noscript")
+        val doc = if (noscript != null) {
+            Jsoup.parseBodyFragment(noscript.html(), response.request.url.toString())
+        } else {
+            document
+        }
+        val images = doc.select("div#readerarea img, img")
 
-        val postResponse = client.newCall(POST("$baseUrl/themes/ajax/ch.php", headers, body)).execute()
-
-        return postResponse.asJsoup().select("img").mapIndexed { i, element ->
-            Page(i, imageUrl = element.attr("abs:src"))
+        return images.distinctBy { it.attr("abs:src") }.mapIndexed { i, element ->
+            val url = when {
+                element.hasAttr("data-lazy-src") -> element.attr("abs:data-lazy-src")
+                element.hasAttr("data-src") -> element.attr("abs:data-src")
+                element.hasAttr("data-cfsrc") -> element.attr("abs:data-cfsrc")
+                else -> element.attr("abs:src")
+            }
+            Page(i, imageUrl = url)
         }
     }
 
