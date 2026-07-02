@@ -24,7 +24,7 @@ jobs:
         with:
           repository: keiyoushi/extensions-source
           path: upstream
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.2.0
@@ -34,19 +34,44 @@ jobs:
       - name: Compare upstream and local commit timestamps
         id: compare_commits
         run: |
-          LOCAL_COMMIT_TS=$(git log -1 --format=%ct HEAD)
-          UPSTREAM_COMMIT_TS=$(git -C upstream log -1 --format=%ct HEAD)
+          should_sync=false
+          checked_extensions=0
+          updated_extensions=()
 
-          echo "local_commit_ts=$LOCAL_COMMIT_TS" >> "$GITHUB_OUTPUT"
-          echo "upstream_commit_ts=$UPSTREAM_COMMIT_TS" >> "$GITHUB_OUTPUT"
+          while IFS= read -r extension_path; do
+            [ -n "$extension_path" ] || continue
+            [ -d "upstream/$extension_path" ] || continue
 
-          if [ "$UPSTREAM_COMMIT_TS" -le "$LOCAL_COMMIT_TS" ]; then
+            checked_extensions=$((checked_extensions + 1))
+            local_commit_ts=$(git log -1 --format=%ct -- "$extension_path" || true)
+            upstream_commit_ts=$(git -C upstream log -1 --format=%ct -- "$extension_path" || true)
+
+            if [ -z "$local_commit_ts" ] || [ -z "$upstream_commit_ts" ]; then
+              echo "Skipping $extension_path because commit timestamp could not be resolved."
+              continue
+            fi
+
+            echo "$extension_path: local=$local_commit_ts upstream=$upstream_commit_ts"
+
+            if [ "$upstream_commit_ts" -gt "$local_commit_ts" ]; then
+              should_sync=true
+              updated_extensions+=("$extension_path")
+            fi
+          done < <(find src -mindepth 2 -maxdepth 2 -type d | sort)
+
+          {
+            echo "checked_extensions=$checked_extensions"
+            echo "updated_extensions=${updated_extensions[*]}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$should_sync" != "true" ]; then
             echo "should_sync=false" >> "$GITHUB_OUTPUT"
-            echo "Upstream commit is not newer than local commit. Skipping sync."
+            echo "No newer upstream commits were found for extensions present in this repository. Skipping sync."
             exit 0
           fi
 
           echo "should_sync=true" >> "$GITHUB_OUTPUT"
+          echo "Newer upstream commits found for: ${updated_extensions[*]}"
 
       - name: Run synchronization script
         if: steps.compare_commits.outputs.should_sync == 'true'
@@ -101,7 +126,7 @@ jobs:
           FULL_BODY=$(cat <<EOF
           This is an automated pull request created by the Daily Upstream Sync workflow.
           
-          It checks the upstream repository [keiyoushi/extensions-source](https://github.com/keiyoushi/extensions-source) for changes to the active extensions and shared library components in this project, and brings them in.
+          It checks the upstream repository [keiyoushi/extensions-source](https://github.com/keiyoushi/extensions-source) for newer commits to extensions that already exist in this project, then brings in matching extension and shared library updates.
           
           ### Detected Changes:
           $PR_BODY
