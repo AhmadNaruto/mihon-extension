@@ -29,12 +29,13 @@ class Kaguya :
         "id",
         dateFormat = SimpleDateFormat("d MMMM", Locale("en")),
     ) {
+    private val siteCookie = "mas_verified=dkv_eyJpYXQiOjE3ODI5ODU2NTEsImV4cCI6MTc4Mjk5Mjg1MSwidWEiOiIwMWRmNTU3YjA4NzNiMGFjOTM3NzdjODRjMWRkOGIxMGU1MzYzYmU2NjllNWIwOTNiZTY0ZGNjOGEzYTY3ZjhiIiwiaXAiOiIyNDA0OjgwMDA6MTAwOTphYzY6OiIsInYiOjksIm4iOiI1TnhqV1dmVVlIc0UifQ.031f214b7f378ddd6d50d371c138236e4635590d43907398351d5dd7a5798f85;mas_verified_js=dkv_eyJpYXQiOjE3ODI5ODU2NTEsImV4cCI6MTc4Mjk5Mjg1MSwidWEiOiIwMWRmNTU3YjA4NzNiMGFjOTM3NzdjODRjMWRkOGIxMGU1MzYzYmU2NjllNWIwOTNiZTY0ZGNjOGEzYTY3ZjhiIiwiaXAiOiIyNDA0OjgwMDA6MTAwOTphYzY6OiIsInYiOjksIm4iOiI1TnhqV1dmVVlIc0UifQ.031f214b7f378ddd6d50d371c138236e4635590d43907398351d5dd7a5798f85;_lscache_vary=fac8ba25ba40bbd4487586a8344f7292;cf_clearance=ohjjnF0TZR86ayefTbkgiIT4Rt4pjSiB6OE0EGEPprc-1782988917-1.2.1.1-V2.10BKUU9N6qZGLHLghoPiSZF8IX.1Rfi8mjhHu31OwmGLJTeVCXl8bGQyGyVDUuOGyUOdZ_VZ0vDQkF.JMVPCnzj6mc4i5lDvbjePar7h7BD.jRJGoPQ.PAweGLtebluS6Su0W2jYM9UyplpoN8Q74u1oSsQWfYMQmwIb9kU90ILDMh8UEehvLtdk_pBTWHVhkAuhFdQbsWe255X15cVbf13DvGhfd1Zq.xJXz1KfSARh8Kn_mVJqvgcUTzvkJJ35bnMAWuwS8_07fLZRZNddZ2W8KGLnSRnt9PB3iSBoz8ZnQTTWsXDwuXtNIgmKUxcPpPzAQOqEYzsGwav96Q;server_name_session=0073e3587173505bb0eb35869b4781fa;"
 
     override val client: OkHttpClient = super.client.newBuilder()
         .readTimeout(1, TimeUnit.MINUTES)
         .build()
 
-    private val json: Json by injectLazy()
+    private val kaguyaJson: Json by injectLazy()
 
     override val id = 1557304490417397104
 
@@ -43,6 +44,9 @@ class Kaguya :
     override val mangaDetailsSelectorTitle = "h1.post-title"
     override val mangaDetailsSelectorStatus = "div.summary-heading:contains(Status) + div"
     override val mangaDetailsSelectorThumbnail = "head meta[property='og:image']" // Same as browse
+
+    override fun headersBuilder() = super.headersBuilder()
+        .add("Cookie", siteCookie)
 
     override fun popularMangaRequest(page: Int) = GET("$baseUrl/popular/${searchPage(page)}", headers)
 
@@ -90,7 +94,7 @@ class Kaguya :
 
     // ============================== Filter ==============================
     override fun parseGenres(document: Document): List<Genre> {
-        val element = runCatching { json.parseToJsonElement(document.text()) }.getOrNull() ?: return emptyList()
+        val element = runCatching { kaguyaJson.parseToJsonElement(document.text()) }.getOrNull() ?: return emptyList()
 
         val candidates = buildList<JsonElement> {
             add(element)
