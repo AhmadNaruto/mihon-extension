@@ -49,26 +49,6 @@
         ]
       },
       {
-        "name": "EveriaClub (unoriginal)",
-        "packageName": "eu.kanade.tachiyomi.extension.all.everiaclubcom",
-        "resources": {
-          "apkUrl": "https://raw.githubusercontent.com/AhmadNaruto/mihon-extension/refs/heads/repo/apk/tachiyomi-all.everiaclubcom-v1.4.1.apk",
-          "iconUrl": "https://raw.githubusercontent.com/AhmadNaruto/mihon-extension/refs/heads/repo/icon/eu.kanade.tachiyomi.extension.all.everiaclubcom.png"
-        },
-        "extensionLib": "1.4",
-        "versionCode": "1",
-        "versionName": "1.4.1",
-        "contentWarning": "CONTENT_WARNING_NSFW",
-        "sources": [
-          {
-            "id": "8698756602692547891",
-            "name": "EveriaClub (unoriginal)",
-            "language": "all",
-            "homeUrl": "https://www.everiaclub.com"
-          }
-        ]
-      },
-      {
         "name": "FoamGirl",
         "packageName": "eu.kanade.tachiyomi.extension.all.foamgirl",
         "resources": {
@@ -2490,6 +2470,26 @@
             "name": "Hwago",
             "language": "id",
             "homeUrl": "https://01.hwago.xyz"
+          }
+        ]
+      },
+      {
+        "name": "Kaguya",
+        "packageName": "eu.kanade.tachiyomi.extension.id.kaguya",
+        "resources": {
+          "apkUrl": "https://raw.githubusercontent.com/AhmadNaruto/mihon-extension/refs/heads/repo/apk/tachiyomi-id.kaguya-v1.4.54.apk",
+          "iconUrl": "https://raw.githubusercontent.com/AhmadNaruto/mihon-extension/refs/heads/repo/icon/eu.kanade.tachiyomi.extension.id.kaguya.png"
+        },
+        "extensionLib": "1.4",
+        "versionCode": "54",
+        "versionName": "1.4.54",
+        "contentWarning": "CONTENT_WARNING_NSFW",
+        "sources": [
+          {
+            "id": "1557304490417397104",
+            "name": "Kaguya",
+            "language": "id",
+            "homeUrl": "https://01.kaguya.pro"
           }
         ]
       },
