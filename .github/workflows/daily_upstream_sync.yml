@@ -31,15 +31,35 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Compare upstream and local commit timestamps
+        id: compare_commits
+        run: |
+          LOCAL_COMMIT_TS=$(git log -1 --format=%ct HEAD)
+          UPSTREAM_COMMIT_TS=$(git -C upstream log -1 --format=%ct HEAD)
+
+          echo "local_commit_ts=$LOCAL_COMMIT_TS" >> "$GITHUB_OUTPUT"
+          echo "upstream_commit_ts=$UPSTREAM_COMMIT_TS" >> "$GITHUB_OUTPUT"
+
+          if [ "$UPSTREAM_COMMIT_TS" -le "$LOCAL_COMMIT_TS" ]; then
+            echo "should_sync=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream commit is not newer than local commit. Skipping sync."
+            exit 0
+          fi
+
+          echo "should_sync=true" >> "$GITHUB_OUTPUT"
+
       - name: Run synchronization script
+        if: steps.compare_commits.outputs.should_sync == 'true'
         run: |
           python .github/scripts/sync-upstream.py
 
       - name: Clean upstream folder
+        if: steps.compare_commits.outputs.should_sync == 'true'
         run: |
           rm -rf upstream
 
       - name: Create Pull Request if changes detected
+        if: steps.compare_commits.outputs.should_sync == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
