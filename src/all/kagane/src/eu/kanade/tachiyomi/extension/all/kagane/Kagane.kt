@@ -395,20 +395,13 @@ abstract class Kagane(
         if (integrityExp < System.currentTimeMillis()) {
             client.newCall(GET("$baseUrl/", headers)).execute().close()
 
-            val response = client.newCall(
+            val res = client.newCall(
                 POST(
                     "$baseUrl/api/integrity",
-                    apiHeaders,
+                    headers,
                     body = "".toRequestBody("application/json".toMediaType()),
                 ),
-            ).execute()
-
-            if (!response.isSuccessful) {
-                response.close()
-                throw IOException("Failed to get integrity token. HTTP error ${response.code}")
-            }
-
-            val res = response.parseAs<IntegrityDto>()
+            ).execute().parseAs<IntegrityDto>()
             integrityToken = res.token
             integrityExp = res.exp * 1000
         }
