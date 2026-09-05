@@ -9,8 +9,8 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.lib.i18n.Intl
+import keiyoushi.utils.asJsoup
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -32,13 +32,10 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 
 // Formerly WPMangaStream & WPMangaReader -> MangaThemesia
-abstract class MangaThemesia(
-    override val name: String,
-    override val baseUrl: String,
-    final override val lang: String,
-    val mangaUrlDirectory: String = "/manga",
-    val dateFormat: SimpleDateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale.US),
-) : HttpSource() {
+abstract class MangaThemesia : HttpSource() {
+
+    open val mangaUrlDirectory: String = "/manga"
+    open val dateFormat: SimpleDateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale.US)
 
     protected open val json: Json by injectLazy()
 
