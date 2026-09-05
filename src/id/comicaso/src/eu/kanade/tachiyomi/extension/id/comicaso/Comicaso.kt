@@ -2,7 +2,6 @@ package eu.kanade.tachiyomi.extension.id.comicaso
 
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -10,6 +9,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.annotation.Source
 import keiyoushi.lib.randomua.addRandomUAPreference
 import keiyoushi.lib.randomua.setRandomUserAgent
 import keiyoushi.network.rateLimit
@@ -24,38 +24,41 @@ import okhttp3.Response
 import rx.Observable
 import java.io.IOException
 
-class Comicaso :
+@Source
+abstract class Comicaso :
     HttpSource(),
     ConfigurableSource {
-
-    override val name = "Comicaso"
-
-    override val baseUrl = "https://v3.comicaso.pro"
-
-    override val lang = "id"
 
     override val supportsLatest = true
 
     override val client: OkHttpClient = network.client.newBuilder()
         .addInterceptor(::authInterceptor)
+        .addInterceptor(::cdnInterceptor)
         .rateLimit(4)
         .build()
 
+    private val defaultUserAgent by lazy {
+        super.headersBuilder().build()["User-Agent"]
+    }
+
     // Android Chrome UA is the default fallback used by Mihon's WebView (for
     // both solving this site's Cloudflare challenge and the Google sign-in
-    // step).
+    // step). It is NOT sent on background API calls — see authInterceptor.
     // If either Cloudflare or Google starts rejecting this default for a
     // given user, they can override it via Settings > Random user agent
     // instead of requiring an extension update.
     override fun headersBuilder() = super.headersBuilder()
         .set("Referer", "$baseUrl/")
         .set("User-Agent", DEFAULT_USER_AGENT)
+        .set("X-Comicaso-Platform", "web")
         .setRandomUserAgent(
             filterInclude = listOf("Chrome", "Safari"),
         )
 
     private fun authInterceptor(chain: Interceptor.Chain): Response {
-        val request = chain.request()
+        val request = chain.request().newBuilder()
+            .apply { defaultUserAgent?.let { header("User-Agent", it) } }
+            .build()
 
         val response = chain.proceed(request)
         if (response.code == 403) {
@@ -66,6 +69,34 @@ class Comicaso :
             }
         }
         return response
+    }
+
+    private fun cdnInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val response = chain.proceed(request)
+
+        if (response.isSuccessful || response.code == 403 || response.code == 401) {
+            return response
+        }
+
+        val host = request.url.host
+        val prefix = HOST_TO_PREFIX[host] ?: return response
+
+        response.close()
+
+        for (domain in CDN_DOMAINS) {
+            val newUrl = request.url.newBuilder()
+                .host("$prefix.$domain")
+                .build()
+            val newRequest = request.newBuilder().url(newUrl).build()
+            val newResponse = chain.proceed(newRequest)
+            if (newResponse.isSuccessful) {
+                return newResponse
+            }
+            newResponse.close()
+        }
+
+        return chain.proceed(request)
     }
 
     // ============================== Popular ==============================
@@ -195,35 +226,21 @@ class Comicaso :
 
     // =============================== Pages ===============================
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
-        val segments = chapter.urlSegments()
-        val source = segments.getOrNull(0) ?: "all"
-        val mangaSlug = segments.getOrNull(1) ?: ""
-        val chapterSlug = segments.getOrNull(2) ?: ""
-
-        val detailsRequest = GET("$baseUrl/api/manga.php?source=$source&slug=$mangaSlug&platform=web", headers)
-
-        return client.newCall(detailsRequest).asObservableSuccess().flatMap { response ->
-            val details = response.parseAs<MangaDetailResponseDto>()
-            val chapterToken = details.data.chapters?.find { it.slug == chapterSlug }?.chapterToken
-                ?: throw IOException("Token chapter tidak ditemukan. Silakan refresh halaman.")
-
-            val pagesRequest = GET(
-                "$baseUrl/api/chapter.php?source=$source&manga=$mangaSlug&chapter=$chapterSlug&platform=web&token=$chapterToken",
-                headers,
-            )
-            client.newCall(pagesRequest).asObservableSuccess().map { pageResponse ->
-                pageListParse(pageResponse)
-            }
-        }
-    }
-
     override fun pageListRequest(chapter: SChapter): Request {
-        val segments = chapter.urlSegments()
-        val source = segments.getOrNull(0) ?: "all"
-        val manga = segments.getOrNull(1) ?: ""
-        val slug = segments.getOrNull(2) ?: ""
-        return GET("$baseUrl/api/chapter.php?source=$source&manga=$manga&chapter=$slug", headers)
+        val url = "$baseUrl/${chapter.url}".toHttpUrl()
+        val source = url.pathSegments.getOrNull(0) ?: "all"
+        val manga = url.pathSegments.getOrNull(1) ?: ""
+        val slug = url.pathSegments.getOrNull(2) ?: ""
+        val token = url.queryParameter("token")!!
+
+        val apiUri = "$baseUrl/api/chapter.php".toHttpUrl().newBuilder().apply {
+            addQueryParameter("source", source)
+            addQueryParameter("manga", manga)
+            addQueryParameter("chapter", slug)
+            addQueryParameter("token", token)
+        }.build()
+
+        return GET(apiUri, headers)
     }
 
     override fun pageListParse(response: Response): List<Page> {
@@ -261,5 +278,13 @@ class Comicaso :
         private val chapterNumberFallbackRegex = Regex("""\d+(?:\.\d+)?""")
         private const val DEFAULT_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36"
+
+        private val CDN_DOMAINS = listOf("basrat.online", "gurihnyoh.site", "jeletot.fun")
+        private val HOST_TO_PREFIX = mapOf(
+            "ap.imgmanga.com" to "tilu",
+            "ap2.imgmanga.com" to "opat",
+            "cdn.imgmacha.com" to "hiji",
+            "cdn2.imgmacha.com" to "dua",
+        )
     }
 }

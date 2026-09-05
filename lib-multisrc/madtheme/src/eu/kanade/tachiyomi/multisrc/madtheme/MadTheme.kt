@@ -9,8 +9,8 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.network.rateLimit
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.tryParse
 import okhttp3.Headers
 import okhttp3.HttpUrl
@@ -28,12 +28,9 @@ import java.util.Calendar
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
-abstract class MadTheme(
-    override val name: String,
-    override val baseUrl: String,
-    override val lang: String,
-    private val dateFormat: SimpleDateFormat = SimpleDateFormat("MMM dd, yyyy", Locale.ENGLISH),
-) : HttpSource() {
+abstract class MadTheme : HttpSource() {
+
+    protected open val dateFormat: SimpleDateFormat = SimpleDateFormat("MMM dd, yyyy", Locale.ENGLISH)
 
     override val supportsLatest = true
 

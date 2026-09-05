@@ -7,7 +7,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.tryParse
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -21,11 +21,7 @@ private val chapterNumberRegex = Regex("""(?i)capitolo\s([0-9]+)""")
 private val dateFormat = SimpleDateFormat("dd MMMM yyyy", Locale.ITALY)
 private val dateFormat2 = SimpleDateFormat("H", Locale.ITALY)
 
-abstract class MangaWorld(
-    override val name: String,
-    override val baseUrl: String,
-    override val lang: String,
-) : HttpSource() {
+abstract class MangaWorld : HttpSource() {
 
     override val supportsLatest = true
 
