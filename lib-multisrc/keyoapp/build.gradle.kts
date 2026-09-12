@@ -1,11 +1,15 @@
-import keiyoushi.gradle.extensions.baseVersionCode
-
 plugins {
     alias(kei.plugins.multisrc)
 }
 
-baseVersionCode = 20
-
 dependencies {
     api(project(":lib:i18n"))
+}
+
+keiyoushi {
+    baseVersionCode = 21
+    libVersion = "1.6"
+    deeplink {
+        path("/series/..*")
+    }
 }

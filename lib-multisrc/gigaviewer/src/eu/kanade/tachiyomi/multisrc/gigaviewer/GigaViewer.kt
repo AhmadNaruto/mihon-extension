@@ -12,7 +12,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstance
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
@@ -28,11 +28,8 @@ import java.util.Locale
 import java.util.TimeZone
 
 // GigaViewer Sources: https://hatena.co.jp/solutions/gigaviewer
-abstract class GigaViewer(
-    override val name: String,
-    override val baseUrl: String,
-    override val lang: String,
-) : HttpSource(),
+abstract class GigaViewer :
+    HttpSource(),
     ConfigurableSource {
     protected open val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.ROOT).apply { timeZone = TimeZone.getTimeZone("UTC") }
     protected open val dayTimeZone = TimeZone.getTimeZone("Asia/Tokyo")!!
