@@ -6,8 +6,8 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.network.rateLimit
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.tryParse
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -19,11 +19,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
-abstract class MultiChan(
-    override val name: String,
-    override val baseUrl: String,
-    final override val lang: String,
-) : HttpSource() {
+abstract class MultiChan : HttpSource() {
 
     override val supportsLatest = true
 

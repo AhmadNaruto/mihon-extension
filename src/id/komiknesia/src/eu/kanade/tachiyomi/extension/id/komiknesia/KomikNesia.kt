@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.parseAs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -16,13 +17,14 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 
-class KomikNesia : HttpSource() {
+@Source
+abstract class KomikNesia : HttpSource() {
 
-    override val name = "KomikNesia"
-    override val baseUrl = "https://02.komiknesia.asia"
     private val apiUrl = "https://api-be.komiknesia.my.id/api"
-    override val lang = "id"
     override val supportsLatest = true
+
+    override fun headersBuilder() = super.headersBuilder()
+        .add("Referer", "$baseUrl/")
 
     private var genresList: List<Pair<String, String>> = emptyList()
     private var genresFetched: Boolean = false
@@ -124,6 +126,11 @@ class KomikNesia : HttpSource() {
 
     override fun pageListParse(response: Response): List<Page> {
         val payload = response.parseAs<PayloadDto<PageListDto>>()
+        // Lock exception disabled: the backend API allows reading locked chapters without login,
+        // so we don't throw an error when loading page images.
+        // if (payload.data.images.isEmpty()) {
+        //     throw java.io.IOException("Chapter terbaru dapat dibaca setelah login melalui WebView, atau tunggu hingga 2 jam dari rilis untuk membaca tanpa login.")
+        // }
         return payload.data.images.mapIndexed { idx, img ->
             Page(idx, imageUrl = img)
         }

@@ -9,8 +9,8 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.lib.unpacker.Unpacker
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
 import okhttp3.FormBody
 import okhttp3.Request
@@ -20,13 +20,12 @@ import okhttp3.Response
 // const val APP_CUSTOMIZATION_URL = "APP_CUSTOMIZATION_URL"
 
 /** 漫漫看 */
-open class MMLook(
-    override val name: String,
-    override val baseUrl: String,
-    private val desktopUrl: String,
-    private val useLegacyMangaUrl: Boolean,
-) : HttpSource() {
-    override val lang: String get() = "zh"
+abstract class MMLook : HttpSource() {
+
+    protected open val desktopUrl = baseUrl.replace("https://m.", "https://www.")
+
+    protected open val useLegacyMangaUrl: Boolean = false
+
     override val supportsLatest: Boolean get() = true
 
     override val client = network.client.newBuilder()

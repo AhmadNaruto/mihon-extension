@@ -22,9 +22,8 @@ class AuthorGroupSeriesOption(val display: String, val key: String) {
     override fun toString(): String = display
 }
 
-class AuthorGroupSeriesFilter(options: Array<AuthorGroupSeriesOption>) : Filter.Select<AuthorGroupSeriesOption>("Filter by Author/Group/Series", options, 0)
-class AuthorGroupSeriesValueFilter : Filter.Text("Nama Author/Group/Series")
-class CharacterFilter : Filter.Text("Karakter")
+class AuthorGroupSeriesFilter(options: Array<AuthorGroupSeriesOption>) : Filter.Select<AuthorGroupSeriesOption>("Filter Tipe", options, 0)
+class AuthorGroupSeriesValueFilter : Filter.Text("Nama")
 class CategoryNames(categories: Array<Category>) : Filter.Select<Category>("Kategori", categories, 0)
 class OrderBy(orders: Array<Order>) : Filter.Select<Order>("Urutkan", orders, 0)
 class GenreList(genres: List<Genre>) : Filter.Group<Genre>("Genre", genres)
@@ -32,30 +31,32 @@ class StatusList(statuses: Array<Status>) : Filter.Select<Status>("Status", stat
 
 val orderBy = arrayOf(
     Order("Semua", ""),
-    Order("A-Z", "title"),
-    Order("Update Terbaru", "update"),
-    Order("Baru Ditambahkan", "latest"),
-    Order("Populer", "popular"),
+    Order("Baru Ditambahkan", "newest"),
+    Order("Terlama", "oldest"),
+    Order("Populer", "rating"),
+    Order("A-Z", "title_asc"),
 )
 
 val statusList = arrayOf(
     Status("Semua", ""),
-    Status("Berlanjut", "Publishing"),
-    Status("Selesai", "Finished"),
+    Status("Berlanjut", "ongoing"),
+    Status("Selesai", "completed"),
 )
 
 val categoryNames = arrayOf(
     Category("Semua", ""),
-    Category("Doujinshi", "Doujinshi"),
-    Category("Manga", "Manga"),
-    Category("Manhwa", "Manhwa"),
+    Category("Doujinshi", "doujinshi"),
+    Category("Manga", "manga"),
+    Category("Manhwa", "manhwa"),
 )
 
 val authorGroupSeriesOptions = arrayOf(
-    AuthorGroupSeriesOption("None", ""),
-    AuthorGroupSeriesOption("Author", "author"),
-    AuthorGroupSeriesOption("Group", "group"),
-    AuthorGroupSeriesOption("Series", "series"),
+    AuthorGroupSeriesOption("Tidak Ada", ""),
+    AuthorGroupSeriesOption("Penulis", "authors"),
+    AuthorGroupSeriesOption("Grup", "groups"),
+    AuthorGroupSeriesOption("Genre", "genres"),
+    AuthorGroupSeriesOption("Seri", "series"),
+    AuthorGroupSeriesOption("Karakter", "characters"),
 )
 
 fun getGenreList() = listOf(
@@ -85,22 +86,20 @@ fun getGenreList() = listOf(
     Genre("Body Swap"),
     Genre("Bodysuit"),
     Genre("Bondage"),
-    Genre("Bowjob"),
     Genre("Business Suit"),
     Genre("Cheating"),
     Genre("Collar"),
-    Genre("Collor"),
     Genre("Condom"),
     Genre("Cousin"),
     Genre("Crossdressing"),
     Genre("Cunnilingus"),
+    Genre("DILF"),
     Genre("Dark Skin"),
     Genre("Daughter"),
     Genre("Defloration"),
     Genre("Demon"),
     Genre("Demon Girl"),
     Genre("Dick Growth"),
-    Genre("DILF"),
     Genre("Double Penetration"),
     Genre("Drugs"),
     Genre("Drunk"),
@@ -120,7 +119,6 @@ fun getGenreList() = listOf(
     Genre("Gender Bender"),
     Genre("Ghost"),
     Genre("Glasses"),
-    Genre("Gore"),
     Genre("Group"),
     Genre("Guro"),
     Genre("Gyaru"),
@@ -138,6 +136,7 @@ fun getGenreList() = listOf(
     Genre("Inseki"),
     Genre("Inverted Nipples"),
     Genre("Invisible"),
+    Genre("Kemomi"),
     Genre("Kemomimi"),
     Genre("Kimono"),
     Genre("Lactation"),
@@ -145,12 +144,11 @@ fun getGenreList() = listOf(
     Genre("Lingerie"),
     Genre("Loli"),
     Genre("Lolipai"),
+    Genre("MILF"),
     Genre("Maid"),
-    Genre("Males"),
     Genre("Males Only"),
     Genre("Masturbation"),
     Genre("Miko"),
-    Genre("MILF"),
     Genre("Mind Break"),
     Genre("Mind Control"),
     Genre("Minigirl"),
@@ -167,7 +165,6 @@ fun getGenreList() = listOf(
     Genre("Nipple Fuck"),
     Genre("Nurse"),
     Genre("Old Man"),
-    Genre("Only"),
     Genre("Oyakodon"),
     Genre("Paizuri"),
     Genre("Pantyhose"),
