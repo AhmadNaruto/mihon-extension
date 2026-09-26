@@ -1,7 +1,12 @@
-import keiyoushi.gradle.extensions.baseVersionCode
-
 plugins {
     alias(kei.plugins.multisrc)
 }
 
-baseVersionCode = 1
+keiyoushi {
+    baseVersionCode = 2
+    libVersion = "1.6"
+
+    deeplink {
+        path("/mangas/..*")
+    }
+}

@@ -4,9 +4,19 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.util.Calendar
+
+const val MANGA_ID_MEMO = "mangaId"
+const val CHAPTER_ID_MEMO = "chapterId"
+const val CHAPTER_VOTES_MEMO = "votes"
+const val CHAPTER_OFFICIAL_MEMO = "official"
+const val CHAPTER_GROUP_ID_MEMO = "groupId"
+const val CHAPTER_LIST_DEDUPLICATED_MEMO = "chapterListDeduplicated"
+const val CHAPTER_LIST_BLACKLIST_MEMO = "chapterListBlacklist"
 
 @Serializable
 class Term(
@@ -49,6 +59,7 @@ class Manga(
     private val rank: Int = 0,
     private val year: Int? = null,
     private val originalLanguage: String? = null,
+    private val links: Map<String, String?>? = null,
     private val url: String? = null,
 ) {
     @Serializable
@@ -93,6 +104,7 @@ class Manga(
         showTags: Boolean = false,
     ) = SManga.create().apply {
         url = this@Manga.url?.substringAfter("/title") ?: "/$hid"
+        memo = buildJsonObject { put(MANGA_ID_MEMO, hid) }
         title = this@Manga.title
 
         val actualAuthors = authors ?: authorOld
@@ -113,8 +125,8 @@ class Manga(
             val actualAltTitles = altTitles.ifEmpty { altTitlesOld }
             if (altTitlesInDesc && actualAltTitles.isNotEmpty()) {
                 append("\n\n")
-                append("Alternative Names:\n")
-                append(actualAltTitles.joinToString("\n"))
+                append("**Alternative Names**:\n")
+                append(actualAltTitles.joinToString("\n") { "- $it" })
             }
 
             if (showExtraInfo) {
@@ -122,6 +134,13 @@ class Manga(
                 if (extras.isNotEmpty()) {
                     if (isNotEmpty()) append("\n\n")
                     append(extras.joinToString("\n"))
+                }
+
+                val trackerLinks = getTrackerLinks()
+                if (trackerLinks.isNotEmpty()) {
+                    if (isNotEmpty()) append("\n\n")
+                    append("**Trackers**:\n")
+                    append(trackerLinks.joinToString("\n") { "- $it" })
                 }
             }
 
@@ -146,27 +165,44 @@ class Manga(
 
     fun toBasicSManga(posterQuality: String?) = SManga.create().apply {
         url = this@Manga.url?.substringAfter("/title") ?: "/$hid"
+        memo = buildJsonObject { put(MANGA_ID_MEMO, hid) }
         title = this@Manga.title
         thumbnail_url = this@Manga.poster?.from(posterQuality)
     }
 
     private fun buildExtraInfo(): List<String> = buildList {
-        year?.takeIf { it > 0 }?.let { add("Year: $it") }
-        originalLanguage?.takeIf { it.isNotBlank() }?.let { add("Language: ${it.uppercase()}") }
+        year?.takeIf { it > 0 }?.let { add("**Year**: $it") }
+        originalLanguage?.takeIf { it.isNotBlank() }?.let { add("**Language**: ${it.uppercase()}") }
         contentRating.takeIf { it.isNotBlank() }?.let {
-            add("Content rating: ${it.replaceFirstChar(Char::uppercase)}")
+            add("**Content rating**: ${it.replaceFirstChar(Char::uppercase)}")
         }
-        rank.takeIf { it > 0 }?.let { add("Rank: #$it") }
-        ratedCount.takeIf { it > 0 }?.let { add("Rated by: $it") }
-        followsTotal.takeIf { it > 0 }?.let { add("Followed by: $it") }
+        rank.takeIf { it > 0 }?.let { add("**Rank**: #$it") }
+        ratedCount.takeIf { it > 0 }?.let { add("**Rated by**: $it") }
+        followsTotal.takeIf { it > 0 }?.let { add("**Followed by**: $it") }
     }
 
-    // The site has separate `genres`, `tags`, `formats`, and `demographics`
-    // groupings but only the curated `genres` (plus the type and demographics)
-    // belong in Mihon's "genre" chips by default — the `tags` list is dozens
-    // of narrative descriptors and the site doesn't surface them in its own
-    // detail layout. Users who want them back can flip the
-    // "Show tags in genre chips" preference.
+    private fun getTrackerLinks(): List<String> {
+        val linkMap = links ?: return emptyList()
+        val siteNames = listOf(
+            "al" to "AniList",
+            "mal" to "MyAnimeList",
+            "mu" to "MangaUpdates",
+            "md" to "MangaDex",
+            "mb" to "MangaBaka",
+        )
+        val knownLinks = siteNames.mapNotNull { (key, name) ->
+            val url = linkMap[key]?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            "[$name]($url)"
+        }
+        val unknownLinks = linkMap.filterKeys { k -> siteNames.none { it.first == k } }
+            .mapNotNull { (key, url) ->
+                val validUrl = url?.takeIf { it.startsWith("http") } ?: return@mapNotNull null
+                "[${key.uppercase()}]($validUrl)"
+            }
+        return knownLinks + unknownLinks
+    }
+
+    // Tags are separate from the curated genres in the site's detail UI.
     private fun getGenres(showTags: Boolean) = buildList {
         when (type) {
             "manhwa" -> add("Manhwa")
@@ -269,6 +305,12 @@ class Chapter(
             } else {
                 "title/$mangaSlug/$id-chapter-${number.toString().removeSuffix(".0")}"
             }
+        }
+        memo = buildJsonObject {
+            put(CHAPTER_ID_MEMO, id)
+            put(CHAPTER_VOTES_MEMO, votes)
+            put(CHAPTER_OFFICIAL_MEMO, isOfficial)
+            group?.id?.let { put(CHAPTER_GROUP_ID_MEMO, it) }
         }
         name = buildString {
             append("Chapter ")

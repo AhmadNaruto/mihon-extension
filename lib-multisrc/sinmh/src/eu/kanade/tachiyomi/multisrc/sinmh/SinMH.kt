@@ -8,8 +8,8 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.network.rateLimit
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.tryParse
 import okhttp3.Headers
@@ -25,14 +25,11 @@ import java.util.Locale
  * ref: https://github.com/kanasimi/CeJS/tree/master/application/net/work_crawler/sites
  *      https://github.com/kanasimi/work_crawler/blob/master/document/README.cmn-Hant-TW.md
  */
-abstract class SinMH(
-    override val name: String,
-    _baseUrl: String,
-    override val lang: String = "zh",
-) : HttpSource() {
+abstract class SinMH : HttpSource() {
 
-    override val baseUrl = _baseUrl
-    protected open val mobileUrl = _baseUrl.replaceFirst("www.", "m.")
+    protected open val mobileUrl: String
+        get() = baseUrl.replaceFirst("www.", "m.")
+
     override val supportsLatest = true
 
     override val client = network.client.newBuilder().rateLimit(2).build()
