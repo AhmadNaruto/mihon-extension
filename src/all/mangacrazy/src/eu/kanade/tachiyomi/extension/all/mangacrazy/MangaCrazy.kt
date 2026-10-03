@@ -1,7 +1,9 @@
 package eu.kanade.tachiyomi.extension.all.mangacrazy
 
 import eu.kanade.tachiyomi.multisrc.madara.Madara
+import keiyoushi.annotation.Source
 
-class MangaCrazy : Madara("MangaCrazy", "https://mangacrazy.net", "all") {
-    override val useNewChapterEndpoint = true
+@Source
+abstract class MangaCrazy : Madara() {
+    override val chapterMode = ChapterMode.MangaAjax
 }
