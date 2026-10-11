@@ -1,9 +1,15 @@
 package eu.kanade.tachiyomi.multisrc.pam
 
 import eu.kanade.tachiyomi.source.model.SManga
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KeepGeneratedSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNames
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonTransformingSerializer
 
 @Serializable
 class Version(
@@ -17,7 +23,7 @@ class LibraryResponse(
     @Serializable
     class Series(
         val data: List<BrowseManga>,
-        val meta: Meta,
+        val meta: Meta? = null,
     ) {
         @Serializable
         class Meta(
@@ -26,6 +32,21 @@ class LibraryResponse(
             @SerialName("last_page")
             val last: Int,
         )
+    }
+}
+
+@OptIn(ExperimentalSerializationApi::class)
+@KeepGeneratedSerializer
+@Serializable(with = SearchResponseSerializer::class)
+class SearchResponse(
+    val data: List<BrowseManga>,
+)
+
+// Queries under two characters are answered with a bare `[]` instead of `{"data":[]}`
+object SearchResponseSerializer : JsonTransformingSerializer<SearchResponse>(SearchResponse.generatedSerializer()) {
+    override fun transformDeserialize(element: JsonElement): JsonElement = when (element) {
+        is JsonArray -> JsonObject(mapOf("data" to element))
+        else -> element
     }
 }
 
@@ -55,6 +76,7 @@ class MangaResponse(
         @Serializable
         class Manga(
             val slug: String,
+            val uid: String,
             @JsonNames("name")
             val title: String,
             @JsonNames("cover_image")
@@ -69,7 +91,8 @@ class MangaResponse(
             val status: String? = null,
             val type: Name? = null,
             val genres: List<Name>,
-            val chapters: List<Chapter>,
+            // Deferred on some sites, which then page it through /api/v1/series/{uid}/chapters
+            val chapters: List<Chapter>? = null,
         )
 
         @Serializable
@@ -89,20 +112,26 @@ class MangaResponse(
 
 @Serializable
 class PageListResponse(
+    val component: String,
+    val version: String,
     val props: Props,
 ) {
     @Serializable
     class Props(
         @SerialName("page_count")
-        val pageCount: Int,
+        val pageCount: Int = 0,
         @SerialName("chapter_token")
-        val chapterToken: String,
+        val chapterToken: String? = null,
         @SerialName("server_pubkey")
         val serverPubkey: String,
+        @SerialName("reader_v2")
+        val readerV2: Boolean = false,
+        val attestation: Attestation? = null,
         val data: Data,
     ) {
         @Serializable
         class Data(
+            val uid: String,
             val slug: String,
             val serie: Serie,
         )
@@ -110,4 +139,83 @@ class PageListResponse(
         @Serializable
         class Serie(val slug: String)
     }
+}
+
+@Serializable
+class Attestation(
+    val challenge: String,
+    @SerialName("webgl_seed")
+    val webglSeed: String,
+)
+
+/** Partial Inertia reload, asking only for the freshly minted token and challenge. */
+@Serializable
+class AttestationReload(
+    val props: Props,
+) {
+    @Serializable
+    class Props(
+        @SerialName("chapter_token")
+        val chapterToken: String? = null,
+        val attestation: Attestation? = null,
+    )
+}
+
+@Serializable
+class AttestationResponse(
+    val ct: String? = null,
+    val supported: Boolean = true,
+)
+
+@Serializable
+class ManifestResponse(
+    val base: String,
+    val hint: String,
+    val count: Int,
+    val variants: List<Int> = emptyList(),
+)
+
+@Serializable
+class AttestationRequest(
+    val c: String,
+    val v: String,
+    val sp: String,
+    val d: String,
+    val pk: String,
+)
+
+@Serializable
+class ManifestRequest(
+    val v: Int,
+    val c: String,
+    val t: String,
+    val ts: Long,
+    val n: String,
+    val s: String,
+)
+
+@Serializable
+class ChapterListResponse(
+    val items: List<ChapterListItem>,
+    @SerialName("last_page")
+    val lastPage: Int,
+)
+
+@Serializable
+class ChapterListItem(
+    private val slug: String,
+    private val title: String,
+    private val type: String,
+    @SerialName("free_at")
+    private val freeAt: String? = null,
+    @SerialName("created_at")
+    private val createdAt: String,
+) {
+    /** Premium chapters turn public at [freeAt]. */
+    fun toChapter(isFree: (String) -> Boolean) = MangaResponse.Props.Chapter(
+        slug = slug,
+        title = title,
+        createdAt = createdAt,
+        isPremium = type == "premium" && freeAt?.let(isFree) != true,
+    )
 }

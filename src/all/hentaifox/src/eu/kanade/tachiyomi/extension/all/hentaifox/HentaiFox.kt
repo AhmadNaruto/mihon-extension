@@ -1,34 +1,42 @@
 package eu.kanade.tachiyomi.extension.all.hentaifox
 
 import eu.kanade.tachiyomi.multisrc.galleryadults.GalleryAdults
-import eu.kanade.tachiyomi.multisrc.galleryadults.Genre
 import eu.kanade.tachiyomi.multisrc.galleryadults.SortOrderFilter
 import eu.kanade.tachiyomi.multisrc.galleryadults.imgAttr
 import eu.kanade.tachiyomi.multisrc.galleryadults.toDate
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
+import keiyoushi.network.post
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
+import kotlinx.serialization.json.JsonElement
 import okhttp3.FormBody
-import okhttp3.Headers
-import okhttp3.HttpUrl
-import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-class HentaiFox(
-    lang: String = "all",
-    override val mangaLang: String = LANGUAGE_MULTI,
-) : GalleryAdults(
-    "HentaiFox",
-    "https://hentaifox.com",
-    lang = lang,
-) {
+@Source
+abstract class HentaiFox : GalleryAdults() {
+
+    override val mangaLang = when (lang) {
+        "en" -> LANGUAGE_ENGLISH
+        "ja" -> LANGUAGE_JAPANESE
+        "zh" -> LANGUAGE_CHINESE
+        "ko" -> LANGUAGE_KOREAN
+        "all" -> LANGUAGE_MULTI
+        else -> throw IllegalArgumentException("Invalid lang: $lang")
+    }
+
     override val supportsLatest = mangaLang.isNotBlank()
+
+    override val xhrHeaders get() = headersBuilder().apply {
+        csrfToken?.let { add("X-Csrf-Token", it) }
+        add("X-Requested-With", "XMLHttpRequest")
+    }
+        .build()
 
     private val languages: List<Pair<String, String>> = listOf(
         Pair(LANGUAGE_ENGLISH, "1"),
@@ -52,44 +60,19 @@ class HentaiFox(
             }
         }
 
-    override val useShortTitlePreference = false
-    override fun Element.mangaTitle(selector: String): String? = mangaFullTitle(selector)
-
-    override fun Element.getInfo(tag: String): String = select("ul.${tag.lowercase()} a")
-        .joinToString {
-            val name = it.ownText()
-            if (tag.contains(regexTag)) {
-                genres[name] = it.attr("href")
-                    .removeSuffix("/").substringAfterLast('/')
-            }
-            listOf(
-                name,
-                it.select(".split_tag").text()
-                    .removePrefix("| ")
-                    .trim(),
-            )
-                .filter { s -> s.isNotBlank() }
-                .joinToString()
-        }
+    override fun getInfoSelector(tag: String) = "ul.${tag.lowercase()} a"
 
     override fun Element.getTime(): Long = selectFirst(".pages:contains(Posted:)")?.ownText()
         ?.removePrefix("Posted: ")
-        .toDate(simpleDateFormat)
+        .toDate(null)
 
-    override fun HttpUrl.Builder.addPageUri(page: Int): HttpUrl.Builder {
-        val url = toString()
+    override fun String.addPageUri(page: Int) = buildString {
+        append(this@addPageUri)
         when {
-            url == "$baseUrl/" && page == 2 ->
-                addPathSegments("page/$page")
-
-            url.contains('?') ->
-                addQueryParameter("page", page.toString())
-
-            else ->
-                addPathSegments("pag/$page")
+            equals("$baseUrl/") && page == 2 -> append("page/$page/")
+            contains('?') -> append("&page=$page")
+            else -> append("/pag/$page/")
         }
-        addPathSegment("") // trailing slash (/)
-        return this
     }
 
     /**
@@ -109,10 +92,10 @@ class HentaiFox(
     override val favoritePath = "includes/user_favs.php"
     override val pagesRequest = "includes/thumbs_loader.php"
 
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         listOf(
             Filter.Header("HINT: Use double quote (\") for exact match"),
-        ) + super.getFilterList().list,
+        ) + super.getFilterList(data).list,
     )
 
     private val sidebarPath = "includes/sidebar.php"
@@ -127,24 +110,13 @@ class HentaiFox(
 
     private var csrfToken: String? = null
 
-    override fun tagsParser(document: Document): List<Genre> {
-        csrfToken = csrfParser(document)
-        return super.tagsParser(document)
+    private fun Document.storeCsrf() {
+        csrfToken = select("[name=csrf-token]").attr("content")
     }
 
-    private fun csrfParser(document: Document): String = document.select("[name=csrf-token]").attr("content")
+    override fun parsePopularManga(document: Document) = super.parsePopularManga(document.also { it.storeCsrf() })
 
-    private fun setSidebarHeaders(csrfToken: String?): Headers {
-        if (csrfToken == null) {
-            return xhrHeaders
-        }
-        return xhrHeaders.newBuilder()
-            .add("X-Csrf-Token", csrfToken)
-            .add("Referer", "$baseUrl/")
-            .build()
-    }
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         // Sidebar mangas should always override any other search, so they should appear first
         // and only propagate to super when a "normal" search is issued
         val sortOrderFilter = filters.firstInstanceOrNull<SortOrderFilter>()
@@ -152,28 +124,32 @@ class HentaiFox(
         sortOrderFilter?.let {
             val selectedCategory = sortOrderFilter.values[sortOrderFilter.state]
             if (sidebarCategoriesFilterStateMap.containsKey(selectedCategory)) {
-                return sidebarRequest(
-                    sidebarCategoriesFilterStateMap.getValue(selectedCategory),
+                return parseSearchManga(
+                    getSidebar(
+                        sidebarCategoriesFilterStateMap.getValue(selectedCategory),
+                    ),
                 )
             }
         }
-        return super.searchMangaRequest(page, query, filters)
+
+        return super.getSearchMangaList(page, query, filters)
     }
 
-    private fun sidebarRequest(category: String): Request {
+    private suspend fun getSidebar(category: String): Response {
         val url = "$baseUrl/$sidebarPath"
-        return POST(
+        return client.post(
             url,
-            setSidebarHeaders(csrfToken),
+            xhrHeaders,
             FormBody.Builder()
                 .add("type", category)
                 .build(),
         )
     }
 
-    override fun searchMangaParse(response: Response): MangasPage {
+    override fun parseSearchManga(response: Response): MangasPage {
         if (response.request.url.encodedPath.endsWith(sidebarPath)) {
             val document = response.asJsoup()
+
             val mangas = document.select(sidebarMangaSelector())
                 .mapNotNull {
                     SMangaDto(
@@ -193,7 +169,7 @@ class HentaiFox(
 
             return MangasPage(mangas, false)
         } else {
-            return super.searchMangaParse(response)
+            return super.parseSearchManga(response)
         }
     }
 
