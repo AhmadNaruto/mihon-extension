@@ -10,15 +10,13 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 
 @Serializable
-data class MetadataDto(
+class MetadataDto(
     val genres: Map<String, String>,
     val tags: Map<String, String>,
     val sources: List<SourceDto>,
 ) {
     fun getGenresList() = genres
         .map { (k, v) -> FilterData(k, v) }.sortedBy { it.name }
-    fun getTagsList() = tags
-        .map { (k, v) -> FilterData(k, v.replaceFirstChar { c -> c.uppercase() }) }.sortedBy { it.name }
     fun getSourcesList() = sources
         .map { FilterData(it.sourceId, it.title) }.sortedBy { it.name }
 }
@@ -36,7 +34,7 @@ internal class SortFilter(
 
     fun toUriPart(): String {
         val base = selected.value
-        val order = if (state?.ascending == true) "" else ",desc"
+        val order = if (state?.ascending == true) ",asc" else ",desc"
         return if (base.isNotEmpty()) base + order else ""
     }
 }
@@ -49,8 +47,7 @@ private fun getSortFilter() = listOf(
     SelectFilterOption("Popular (Week)", "avg_views_week"),
     SelectFilterOption("Popular (Month)", "avg_views_month"),
     SelectFilterOption("Latest", "updated_at"),
-    SelectFilterOption("By Name", "series_name"),
-    SelectFilterOption("Books count", "books_count"),
+    SelectFilterOption("Books count", "current_books"),
     SelectFilterOption("Created at", "created_at"),
 )
 
@@ -59,29 +56,54 @@ internal class SelectFilterOption(val name: String, val value: String)
 internal class ContentRatingFilter(
     defaultRatings: Set<String>,
     ratings: List<FilterData> = CONTENT_RATINGS.map {
-        FilterData(it.replaceFirstChar { c -> c.uppercase() }, it.replaceFirstChar { c -> c.uppercase() })
+        FilterData(it, it.replaceFirstChar { c -> c.uppercase() })
     },
-) : JsonMultiSelectFilter(
+) : Filter.Group<MultiSelectOption>(
     "Content Rating",
-    "content_rating",
     ratings.map {
         MultiSelectOption(it.name, it.id).apply {
-            state = defaultRatings.contains(it.id.lowercase())
+            state = defaultRatings.contains(it.id)
         }
     },
+),
+    JsonFilter {
+    override fun addToJsonObject(
+        builder: JsonObjectBuilder,
+        key: String,
+        matchAll: Boolean?,
+    ) {
+        val selected = state.filter { it.state }.map { it.id }
+        if (selected.isEmpty()) return
+        builder.putJsonArray("age_rating") {
+            selected.map { AGE_RATINGS.getValue(it) }.distinct().forEach { add(it) }
+        }
+        if ("pornographic" !in selected) {
+            builder.put("is_pornographic", false)
+        }
+    }
+}
+
+// The site has no pornographic age rating; is_pornographic covers it.
+private val AGE_RATINGS = mapOf(
+    "safe" to "Safe",
+    "suggestive" to "FifteenPlus",
+    "erotica" to "EighteenPlus",
+    "pornographic" to "EighteenPlus",
 )
 
 internal class GenresFilter(
     genres: List<FilterData>,
+    excludedIds: Set<String> = emptySet(),
 ) : JsonMultiSelectTriFilter(
     "Genres",
     "genres",
-    genres.map {
-        MultiSelectTriOption(it.name, it.id)
-    },
+    genres.map { MultiSelectTriOption(it.name, it.id) },
+    extraExcluded = excludedIds,
 )
 
-internal class TagsSearchFilter : Filter.Text(" Tags (e.g. Medieval, -Politics)")
+internal class TagsSearchFilter(
+    val tagData: Map<String, String>,
+) : Filter.Text(" Tags (e.g. Medieval, -Politics)")
 
 internal class SourcesFilter(
     sources: List<FilterData>,
@@ -109,7 +131,7 @@ internal open class JsonMultiSelectFilter(
     override fun addToJsonObject(
         builder: JsonObjectBuilder,
         key: String,
-        additionExcludeList: List<String>,
+        matchAll: Boolean?,
     ) {
         val whatToInclude = state.filter { it.state }.map { it.id }
         with(builder) {
@@ -136,23 +158,16 @@ internal open class JsonMultiSelectTriFilter(
     name: String,
     private val param: String,
     genres: List<MultiSelectTriOption>,
+    private val extraExcluded: Set<String> = emptySet(),
 ) : Filter.Group<MultiSelectTriOption>(name, genres),
     JsonFilter {
     override fun addToJsonObject(
         builder: JsonObjectBuilder,
         key: String,
-        additionExcludeList: List<String>,
-    ) {
-        addToJsonObject(builder, key, additionExcludeList, matchAll = true)
-    }
-    fun addToJsonObject(
-        builder: JsonObjectBuilder,
-        key: String,
-        additionExcludeList: List<String> = emptyList(),
         matchAll: Boolean?,
     ) {
         val whatToInclude = state.filter { it.state == TriState.STATE_INCLUDE }.map { it.id }
-        val whatToExclude = state.filter { it.state == TriState.STATE_EXCLUDE }.map { it.id } + additionExcludeList
+        val whatToExclude = state.filter { it.state == TriState.STATE_EXCLUDE }.map { it.id } + extraExcluded
 
         with(builder) {
             if (whatToInclude.isNotEmpty() || whatToExclude.isNotEmpty()) {
@@ -163,7 +178,6 @@ internal open class JsonMultiSelectTriFilter(
                     putJsonArray("values") {
                         whatToInclude.forEach { add(it) }
                     }
-
                     if (whatToExclude.isNotEmpty()) {
                         putJsonArray("exclude") {
                             whatToExclude.forEach { add(it) }
@@ -206,75 +220,6 @@ internal interface JsonFilter {
     fun addToJsonObject(
         builder: JsonObjectBuilder,
         key: String = "",
-        additionExcludeList: List<String> = emptyList(),
+        matchAll: Boolean? = null,
     )
 }
-
-internal val GenresList = arrayOf(
-    "4-koma",
-    "AI",
-    "Action",
-    "Adventure",
-    "Award Winning",
-    "Comedy",
-    "Coming of Age",
-    "Cooking",
-    "Crime",
-    "Demons",
-    "Doujinshi",
-    "Drama",
-    "Ecchi",
-    "Fan Colored",
-    "Fantasy",
-    "Full Color",
-    "Gender Bender",
-    "Gore",
-    "Harem",
-    "Hentai",
-    "Historical",
-    "Horror",
-    "Isekai",
-    "Josei",
-    "LGBTQIA+",
-    "Magic",
-    "Magical Girls",
-    "Martial Arts",
-    "Mecha",
-    "Medical",
-    "Military",
-    "Monsters",
-    "Music",
-    "Mystery",
-    "Office Workers",
-    "Official Colored",
-    "Omegaverse",
-    "Oneshot",
-    "Philosophical",
-    "Police",
-    "Post-Apocalyptic",
-    "Psychological",
-    "Reincarnation",
-    "Reverse Harem",
-    "Romance",
-    "School Life",
-    "Sci-Fi",
-    "Seinen",
-    "Shoujo Ai",
-    "Shoujo",
-    "Shounen Ai",
-    "Shounen",
-    "Slice of Life",
-    "Smut",
-    "Sports",
-    "Supernatural",
-    "Survival",
-    "Thriller",
-    "Time Travel",
-    "Tragedy",
-    "Vampires",
-    "Video Games",
-    "Villainess",
-    "Wuxia",
-    "Yaoi",
-    "Yuri",
-)
