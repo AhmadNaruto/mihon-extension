@@ -1,52 +1,30 @@
 package eu.kanade.tachiyomi.extension.id.westmanga
 
-import android.os.Handler
-import android.os.Looper
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import keiyoushi.utils.applicationContext
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
+import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.getLocalStorage
+import keiyoushi.utils.hmacSha256
 import keiyoushi.utils.parseAs
+import kotlinx.serialization.json.JsonElement
+import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 
-class WestManga : HttpSource() {
-    override val name = "West Manga"
-    override val baseUrl = "https://v1.westmanga.cc"
-    private val apiUrl = "https://data.mantweh.online"
-    override val lang = "id"
-    override val id = 8883916630998758688
-    override val supportsLatest = true
+@Source
+abstract class WestManga : KeiSource() {
+    override suspend fun getPopularManga(page: Int) = getSearchMangaList(page, "", SortFilter.popular)
 
-    private var genres: List<Pair<String, String>> = emptyList()
-    private var genresFetchJob: Boolean = false
+    override suspend fun getLatestUpdates(page: Int) = getSearchMangaList(page, "", SortFilter.latest)
 
-    override fun headersBuilder() = super.headersBuilder()
-        .set("Referer", "$baseUrl/")
-
-    override fun popularMangaRequest(page: Int) = searchMangaRequest(page, "", SortFilter.popular)
-
-    override fun popularMangaParse(response: Response) = searchMangaParse(response)
-
-    override fun latestUpdatesRequest(page: Int) = searchMangaRequest(page, "", SortFilter.latest)
-
-    override fun latestUpdatesParse(response: Response) = searchMangaParse(response)
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = "$apiUrl/api/contents".toHttpUrl().newBuilder().apply {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val url = "$baseUrl/api/contents".toHttpUrl().newBuilder().apply {
             if (query.isNotBlank()) {
                 addQueryParameter("q", query)
             }
@@ -58,40 +36,60 @@ class WestManga : HttpSource() {
             }
         }.build()
 
-        return apiRequest(url)
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        val data = response.parseAs<PaginatedData<BrowseManga>>()
-        val entries = data.data.map { it.toSManga() }
+        val data = client.get(url, apiHeaders(url)).parseAs<PaginatedData<BrowseManga>>()
+        val entries = data.data.map { it.toSManga(baseUrl) }
         return MangasPage(entries, data.paginator.hasNextPage())
     }
 
-    override fun getFilterList(): FilterList {
-        fetchGenres()
+    override val supportsFilterFetching = true
 
-        val filters = mutableListOf<Filter<*>>(
-            SortFilter(),
-            StatusFilter(),
-            CountryFilter(),
-            ColorFilter(),
-        )
-
-        if (genres.isEmpty()) {
-            filters.add(Filter.Header("Klik pada 'Atur ulang' untuk memuat ulang genre"))
-        } else {
-            filters.add(GenreFilter(genres))
-        }
-
-        return FilterList(filters)
+    override suspend fun fetchFilterData(): JsonElement {
+        val url = "$baseUrl/api/contents/genres".toHttpUrl()
+        return client.get(url, apiHeaders(url, includeToken = false)).parseAs()
     }
 
-    override fun mangaDetailsRequest(manga: SManga): Request {
+    override fun getFilterList(data: JsonElement?): FilterList {
+        val genres = data?.parseAs<Data<List<ApiGenre>>>()?.data
+            ?.map { it.name to it.id.toString() }
+
+        return FilterList(
+            listOfNotNull(
+                SortFilter(),
+                StatusFilter(),
+                CountryFilter(),
+                ColorFilter(),
+                genres?.takeIf { it.isNotEmpty() }?.let { GenreFilter(it) },
+            ),
+        )
+    }
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val slug = when (url.pathSegments.firstOrNull()) {
+            "comic", "manga" -> url.pathSegments.getOrNull(1)
+            else -> null
+        } ?: return null
+        val api = "$baseUrl/api/comic/$slug".toHttpUrl()
+
+        return client.get(api, apiHeaders(api)).parseAs<Data<Manga>>().data
+            .toSManga(baseUrl)
+    }
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
         val path = "$baseUrl${manga.url}".toHttpUrl().pathSegments
         require(path.size == 3) { "Migrate from $name to $name" }
         val slug = path[1]
+        val api = "$baseUrl/api/comic/$slug".toHttpUrl()
 
-        return apiRequest("$apiUrl/api/comic/$slug".toHttpUrl())
+        val data = client.get(api, apiHeaders(api)).parseAs<Data<Manga>>().data
+        return SMangaUpdate(
+            data.toSManga(baseUrl),
+            data.chapters.map { it.toSChapter() },
+        )
     }
 
     override fun getMangaUrl(manga: SManga): String {
@@ -99,24 +97,17 @@ class WestManga : HttpSource() {
         return "$baseUrl/comic/$slug"
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val data = response.parseAs<Data<Manga>>().data
-        return data.toSManga(baseUrl)
-    }
-
-    override fun chapterListRequest(manga: SManga) = mangaDetailsRequest(manga)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val data = response.parseAs<Data<Manga>>().data
-        return data.chapters.map { it.toSChapter() }
-    }
-
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val path = "$baseUrl${chapter.url}".toHttpUrl().pathSegments
         require(path.isNotEmpty()) { "Refresh Chapter List" }
         val slug = path.first()
 
-        return apiRequest("$apiUrl/api/v/$slug".toHttpUrl())
+        val url = "$baseUrl/api/v/$slug".toHttpUrl()
+        val data = client.get(url, apiHeaders(url)).parseAs<Data<ImageList>>().data
+        return data.images.mapIndexed { idx, img ->
+            val imgUrl = if (img.startsWith("http")) img else "$baseUrl$img"
+            Page(idx, imageUrl = imgUrl)
+        }
     }
 
     override fun getChapterUrl(chapter: SChapter): String {
@@ -124,93 +115,34 @@ class WestManga : HttpSource() {
         return "$baseUrl/view/$slug"
     }
 
-    override fun pageListParse(response: Response): List<Page> {
-        val data = response.parseAs<Data<ImageList>>().data
-
-        return data.images.mapIndexed { idx, img ->
-            Page(idx, imageUrl = img)
-        }
-    }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
-    private fun fetchGenres() {
-        if (genres.isNotEmpty() || genresFetchJob) return
-        genresFetchJob = true
-
-        val url = "$apiUrl/api/contents/genres".toHttpUrl()
-        val request = apiRequest(url, true)
-        client.newCall(request).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
-                genresFetchJob = false
-            }
-
-            override fun onResponse(call: okhttp3.Call, response: Response) {
-                response.use { res ->
-                    runCatching {
-                        if (res.isSuccessful) {
-                            val apiGenres = res.parseAs<Data<List<ApiGenre>>>().data
-                            genres = apiGenres.map { it.name to it.id.toString() }
-                        }
-                    }.onFailure {
-                        genresFetchJob = false
-                    }
-                }
-            }
-        })
-    }
-
     private var tokenCache: String? = null
+    private var tokenChecked = false
 
-    val bearerToken: String?
-        get() {
-            if (tokenCache != null) return tokenCache
-
-            val handler = Handler(Looper.getMainLooper())
-            val latch = CountDownLatch(1)
-
-            handler.post {
-                val webview = WebView(applicationContext)
-                with(webview.settings) {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
-                }
-
-                webview.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        view?.evaluateJavascript("localStorage.getItem('access_token')") {
-                            tokenCache = it.takeIf { it != "null" }?.trim('"') ?: "" // don't check again
-                            latch.countDown()
-                            webview.destroy()
-                        }
-                    }
-                }
-                webview.loadDataWithBaseURL(baseUrl, " ", "text/html", "utf-8", null)
+    private suspend fun bearerToken(): String? {
+        if (tokenChecked) return tokenCache
+        tokenCache = runCatching {
+            getLocalStorage(baseUrl, "global-app-storage")?.let {
+                it.parseAs<GlobalAppStorage>().state.session.accsessToken?.takeIf { token -> token.isNotBlank() }
             }
-            latch.await(8, TimeUnit.SECONDS)
-            return tokenCache
-        }
+        }.getOrNull()
+        tokenChecked = true
+        return tokenCache
+    }
 
-    private fun apiRequest(url: HttpUrl, isGenre: Boolean = false): Request {
+    private suspend fun apiHeaders(url: HttpUrl, includeToken: Boolean = true): Headers {
         val timestamp = (System.currentTimeMillis() / 1000).toString()
         val message = "wm-api-request"
         val key = timestamp + "GET" + url.encodedPath + ACCESS_KEY + SECRET_KEY
-        val mac = Mac.getInstance("HmacSHA256")
-        val secretKeySpec = SecretKeySpec(key.toByteArray(Charsets.UTF_8), "HmacSHA256")
-        mac.init(secretKeySpec)
-        val hash = mac.doFinal(message.toByteArray(Charsets.UTF_8))
-        val signature = hash.joinToString("") { "%02x".format(it) }
+        val signature = message.hmacSha256(key.encodeToByteArray()).toHexString()
 
-        val apiHeaders = headersBuilder().apply {
-            if (!isGenre) {
-                bearerToken?.takeUnless { it.isEmpty() }?.let { set("Authorization", "Bearer $it") }
+        return headersBuilder().apply {
+            if (includeToken) {
+                bearerToken()?.let { set("Authorization", "Bearer $it") }
             }
             set("x-wm-request-time", timestamp)
             set("x-wm-accses-key", ACCESS_KEY)
             set("x-wm-request-signature", signature)
         }.build()
-
-        return GET(url, apiHeaders)
     }
 }
 
