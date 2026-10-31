@@ -1,18 +1,21 @@
 package keiyoushi.utils
 
-import eu.kanade.tachiyomi.util.asJsoup
 import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNames
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.serializer
 import okhttp3.Response
+import okio.Buffer
+import okio.ByteString.Companion.decodeBase64
 import org.jsoup.nodes.Document
 import kotlin.reflect.typeOf
 
@@ -44,12 +47,17 @@ private fun <T> extractValueNextJs(
  * ([ReactFlightServer.js](https://github.com/facebook/react/blob/main/packages/react-server/src/ReactFlightServer.js)):
  * - `$$` -> Escaped string, drops the first `$`.
  * - `$undefined` -> JS `undefined`, resolved to JSON null.
- * - `$D<iso>` -> Date, drops `$D` to expose the ISO-8601 string ([ReactFlightDate]).
+ * - `$D<iso>` -> Date, drops `$D` to expose the ISO-8601 string (e.g. `kotlin.time.Instant`).
  * - `$n<digits>` -> BigInt, drops `$n` to expose the digit string ([ReactFlightBigInt]).
  * - `$Infinity` / `$-Infinity` / `$NaN` / `$-0` -> drops `$`, exposes the token string
  *   ([ReactFlightNumber] parses it to the real `Double`; JSON itself has no Infinity/NaN).
  * - `$Q<id>` -> Map, the outlined model at `<id>` is an array of `[key, value]` entries.
  * - `$W<id>` -> Set, the outlined model at `<id>` is an array of values.
+ * - `$L<id>` -> Lazy chunk ([ReactFlightServer]'s `serializeLazyID`), emitted for a subtree that
+ *   didn't finish rendering synchronously (an async Server Component). React wraps the row at
+ *   `<id>` in a `React.lazy`; we flatten it to the row's value.
+ * - `$@<id>` -> Promise (`serializePromiseID`); the row at `<id>` carries the settled value.
+ *   Both are always a bare hex id, never a `:<path>`.
  * - `$<id>` / `$<id>:<path>` -> Outlined model reference ([ReactFlightServer]'s `getOutlinedModel`).
  *   `<id>` is looked up in the ByteText [chunkCache] then the [modelCache]; any `:`-separated
  *   `<path>` segments walk into the model by object key or array index.
@@ -76,10 +84,12 @@ private fun resolveNextJsRefs(
                 str == "\$Infinity" || str == "\$-Infinity" || str == "\$NaN" || str == "\$-0" ->
                     JsonPrimitive(str.substring(1))
                 str[1] == '$' -> JsonPrimitive(str.substring(1)) // Escaped '$' -> keep one
-                str[1] == 'D' -> JsonPrimitive(str.substring(2)) // Date -> strip '$D' for ReactFlightDate
+                str[1] == 'D' -> JsonPrimitive(str.substring(2)) // Date -> strip '$D' to expose ISO-8601 string
                 str[1] == 'n' -> JsonPrimitive(str.substring(2)) // BigInt -> strip '$n' for ReactFlightBigInt
                 str[1] == 'Q' -> resolveMapRef(str.substring(2), chunkCache, modelCache, resolving) ?: element
                 str[1] == 'W' -> resolveSetRef(str.substring(2), chunkCache, modelCache, resolving) ?: element
+                str[1] == 'L' -> resolveModelRef(str.substring(2), chunkCache, modelCache, resolving) ?: element
+                str[1] == '@' -> resolveModelRef(str.substring(2), chunkCache, modelCache, resolving) ?: element
                 // RSC reference (`$<id>` or `$<id>:<path>`) -> resolve via chunk/model cache.
                 else -> resolveModelRef(str.substring(1), chunkCache, modelCache, resolving) ?: element
             }
@@ -178,23 +188,31 @@ private fun resolveSetRef(
     return resolveNextJsRefs(values, chunkCache, modelCache, resolving + id)
 }
 
+/**
+ * Each push is a slice of one flight stream, cut anywhere (often mid-row), so join them before parsing.
+ * `[1]` carries text, `[3]` base64 bytes; `[0]` and `[2]` aren't stream data.
+ */
 private fun Document.extractAppRouterPayloads(
     chunkCache: MutableMap<String, String>,
     modelCache: MutableMap<String, JsonElement>,
-): List<JsonElement> = select("script:not([src])")
-    .map { it.data() }
-    .filter { "self.__next_f.push" in it }
-    .flatMap { script ->
+): List<JsonElement> {
+    val stream = Buffer()
+    for (script in select("script:not([src])")) {
+        val data = script.data().takeIf { "self.__next_f.push" in it } ?: continue
         try {
-            val raw = NEXT_F_REGEX.find(script)?.groupValues?.get(1) ?: return@flatMap emptyList()
-            val arr = jsonInstance.parseToJsonElement(raw).jsonArray
-            val content = arr.getOrNull(1)?.jsonPrimitive?.contentOrNull ?: return@flatMap emptyList()
-
-            extractRscPayloads(content, chunkCache, modelCache)
+            val raw = NEXT_F_REGEX.find(data)?.groupValues?.get(1) ?: continue
+            val push = jsonInstance.parseToJsonElement(raw).jsonArray
+            val content = push.getOrNull(1)?.jsonPrimitive?.contentOrNull ?: continue
+            when (push[0].jsonPrimitive.intOrNull) {
+                1 -> stream.writeUtf8(content)
+                3 -> stream.write(content.decodeBase64() ?: continue)
+            }
         } catch (_: Exception) {
-            emptyList()
         }
     }
+
+    return extractRscPayloads(stream.readUtf8(), chunkCache, modelCache)
+}
 
 private fun Document.extractPagesRouterPayloads(): List<JsonElement> {
     val data = selectFirst("script#__NEXT_DATA__")?.data() ?: return emptyList()
@@ -349,8 +367,16 @@ internal inline fun <reified T> inferredNextJsPredicate(): (JsonElement) -> Bool
 
     val requiredKeys = (0 until elementDescriptor.elementsCount)
         .filterNot { elementDescriptor.isElementOptional(it) || elementDescriptor.getElementDescriptor(it).isNullable }
-        .map { elementDescriptor.getElementName(it) }
-        .toSet()
+        .map { i ->
+            val primaryName = elementDescriptor.getElementName(i)
+            val annotations = elementDescriptor.getElementAnnotations(i)
+
+            val jsonNames = annotations
+                .filterIsInstance<JsonNames>()
+                .flatMap { it.names.toSet() }
+
+            (setOf(primaryName) + jsonNames)
+        }.toSet()
 
     require(requiredKeys.isNotEmpty()) {
         "Cannot infer a predicate for ${elementDescriptor.serialName}: all fields are optional or nullable. Provide an explicit predicate instead."
@@ -361,12 +387,12 @@ internal inline fun <reified T> inferredNextJsPredicate(): (JsonElement) -> Bool
             element is JsonArray &&
                 element.isNotEmpty() &&
                 element.first() is JsonObject &&
-                requiredKeys.all { it in element.first().jsonObject }
+                requiredKeys.all { it.any { it in element.first().jsonObject } }
         }
     } else {
         { element ->
             element is JsonObject &&
-                requiredKeys.all { it in element }
+                requiredKeys.all { it.any { it in element } }
         }
     }
 }
@@ -503,10 +529,12 @@ fun <T> Response.extractNextJs(
     deserializer: DeserializationStrategy<T>,
 ): T? {
     val contentType = header("Content-Type") ?: ""
-    return when {
-        "text/x-component" in contentType -> body.string().extractNextJsRsc(predicate, deserializer)
-        "text/html" in contentType -> asJsoup().extractNextJs(predicate, deserializer)
-        else -> error("Unsupported Content-Type for Next.js extraction: $contentType")
+    return use {
+        when {
+            "text/x-component" in contentType -> body.string().extractNextJsRsc(predicate, deserializer)
+            "text/html" in contentType -> asJsoup().extractNextJs(predicate, deserializer)
+            else -> error("Unsupported Content-Type for Next.js extraction: $contentType")
+        }
     }
 }
 

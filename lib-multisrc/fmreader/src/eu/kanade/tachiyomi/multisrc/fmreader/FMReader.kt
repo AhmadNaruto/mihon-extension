@@ -1,44 +1,37 @@
 package eu.kanade.tachiyomi.multisrc.fmreader
 
 import android.util.Base64
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
+import keiyoushi.utils.tryParseDate
+import kotlinx.serialization.json.JsonElement
 import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.select.Elements
 import java.nio.charset.Charset
-import java.text.ParseException
-import java.text.SimpleDateFormat
+import java.time.format.DateTimeFormatter
 import java.util.Calendar
 import java.util.Locale
 
 /**
  * For sites based on the Flat-Manga CMS
  */
-abstract class FMReader(
-    override val name: String,
-    override val baseUrl: String,
-    override val lang: String,
-    private val dateFormat: SimpleDateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.ENGLISH),
-) : HttpSource() {
+abstract class FMReader : KeiSource() {
 
-    override val supportsLatest = true
+    protected open val dateFormat: DateTimeFormatter = DateTimeFormatter.ofPattern("d/M/yyyy", Locale.ENGLISH)
 
-    override fun headersBuilder() = Headers.Builder().apply {
-        add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64) Gecko/20100101 Firefox/77.0")
-        add("Referer", baseUrl)
-    }
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0")
 
     protected fun Elements.imgAttr(): String? = getImgAttr(this.firstOrNull())
 
@@ -58,13 +51,15 @@ abstract class FMReader(
 
     open val popularSort = "sort=views"
 
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/$requestPath?listType=pagination&page=$page&$popularSort&sort_type=DESC", headers)
+    protected open fun popularMangaUrl(page: Int) = "$baseUrl/$requestPath?listType=pagination&page=$page&$popularSort&sort_type=DESC"
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getPopularManga(page: Int) = popularMangaParse(client.get(popularMangaUrl(page)).asJsoup())
+
+    protected open fun searchMangaUrl(page: Int, query: String, filters: FilterList): HttpUrl {
         val url = "$baseUrl/$requestPath?".toHttpUrl().newBuilder()
             .addQueryParameter("name", query)
             .addQueryParameter("page", page.toString())
-        (if (filters.isEmpty()) getFilterList() else filters).forEach { filter ->
+        filters.forEach { filter ->
             when (filter) {
                 is Status -> {
                     val status = arrayOf("", "1", "2")[filter.state]
@@ -97,14 +92,16 @@ abstract class FMReader(
                 else -> {}
             }
         }
-        return GET(url.build(), headers)
+        return url.build()
     }
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/$requestPath?listType=pagination&page=$page&sort=last_update&sort_type=DESC", headers)
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList) = popularMangaParse(client.get(searchMangaUrl(page, query, filters)).asJsoup())
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    protected open fun latestUpdatesUrl(page: Int) = "$baseUrl/$requestPath?listType=pagination&page=$page&sort=last_update&sort_type=DESC"
 
+    override suspend fun getLatestUpdates(page: Int) = popularMangaParse(client.get(latestUpdatesUrl(page)).asJsoup())
+
+    open fun popularMangaParse(document: Document): MangasPage {
         val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
 
         // check if there's a next page
@@ -118,10 +115,6 @@ abstract class FMReader(
 
         return MangasPage(mangas, hasNextPage)
     }
-
-    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
-
-    override fun searchMangaParse(response: Response) = popularMangaParse(response)
 
     open fun popularMangaSelector() = "div.media, .thumb-item-flow"
 
@@ -154,6 +147,30 @@ abstract class FMReader(
 
     open fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
 
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+
+        val document = client.get(url).asJsoup()
+        val mangaTitle = parseMangaTitle(document) ?: return null
+        return mangaDetailsParse(document).apply {
+            setUrlWithoutDomain(url.toString())
+            title = mangaTitle
+        }
+    }
+
+    protected open fun parseMangaTitle(document: Document): String? = document.selectFirst(".manga-info h1, .manga-info h3")?.text()
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(getMangaUrl(manga)).asJsoup()
+        val details = mangaDetailsParse(document).apply { title = manga.title }
+        return SMangaUpdate(details, fetchChapterList(manga, document))
+    }
+
     // Manga Details Selector
     open val infoElementSelector = "div.row"
     open val mangaDetailsSelectorAuthor = "li a.btn-info"
@@ -165,8 +182,7 @@ abstract class FMReader(
     open val altNameSelector = "li:contains(Other names)"
     open val altName = "Alternative Name" // the alt name already contains ": " eg. ": alt name1, alt name2"
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
+    open fun mangaDetailsParse(document: Document): SManga {
         val infoElement = document.select(infoElementSelector).first()!!
 
         return SManga.create().apply {
@@ -212,8 +228,9 @@ abstract class FMReader(
         }
     }
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
+    protected open suspend fun fetchChapterList(manga: SManga, mangaPage: Document): List<SChapter> = chapterListParse(mangaPage)
+
+    open fun chapterListParse(document: Document): List<SChapter> {
         val mangaTitle = document.select(".manga-info h1, .manga-info h3").text()
         return document.select(chapterListSelector()).map { chapterFromElement(it, mangaTitle) }.distinctBy { it.url }
     }
@@ -313,19 +330,14 @@ abstract class FMReader(
         }
     }
 
-    open fun parseAbsoluteDate(dateStr: String): Long = try {
-        dateFormat.parse(dateStr)?.time ?: 0L
-    } catch (_: ParseException) {
-        0L
-    }
+    open fun parseAbsoluteDate(dateStr: String): Long = dateFormat.tryParseDate(dateStr)
 
     open val pageListImageSelector = "img.chapter-img"
 
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
-        return document.select(pageListImageSelector).mapIndexed { i, img ->
-            Page(i, document.location(), img.imgAttr())
-        }
+    override suspend fun getPageList(chapter: SChapter): List<Page> = pageListParse(client.get(getChapterUrl(chapter)).asJsoup())
+
+    open fun pageListParse(document: Document): List<Page> = document.select(pageListImageSelector).mapIndexed { i, img ->
+        Page(i, document.location(), img.imgAttr())
     }
 
     protected fun base64PageListParse(document: Document): List<Page> {
@@ -351,8 +363,6 @@ abstract class FMReader(
         }
     }
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
     private class TextField(name: String, val key: String) : Filter.Text(name)
     private class Status : Filter.Select<String>("Status", arrayOf("Any", "Completed", "Ongoing"))
     class GenreList(genres: List<Genre>) : Filter.Group<Genre>("Genre", genres)
@@ -360,7 +370,7 @@ abstract class FMReader(
     private class SortBy : Filter.Sort("Sorted By", arrayOf("A-Z", "Most vỉews", "Last updated"), Selection(1, false))
 
     // TODO: Country (leftover from original LHTranslation)
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         TextField("Author", "author"),
         TextField("Group", "group"),
         Status(),
