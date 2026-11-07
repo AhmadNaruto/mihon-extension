@@ -4,21 +4,24 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.jsoup.Jsoup
-import java.text.SimpleDateFormat
+import java.time.DayOfWeek
+import java.time.format.TextStyle
+import java.util.Locale
+import kotlin.time.Instant
 
 @Serializable
 class HeanCmsTokenPayloadDto(
     val token: String? = null,
     private val expiresAt: String? = null,
 ) {
-    fun isExpired(dateFormat: SimpleDateFormat): Boolean {
-        val expiredTime = try {
-            // Reduce one day to prevent timezone issues
-            expiresAt?.let { dateFormat.parse(it)?.time?.minus(1000 * 60 * 60 * 24) } ?: 0L
-        } catch (_: Exception) {
-            0L
-        }
+    fun isExpired(): Boolean {
+        // Reduce one day to prevent timezone issues
+        val expiredTime = expiresAt
+            ?.let { Instant.parseOrNull(it)?.toEpochMilliseconds()?.minus(1000 * 60 * 60 * 24) }
+            ?: 0L
 
         return System.currentTimeMillis() > expiredTime
     }
@@ -57,38 +60,85 @@ class HeanCmsSeriesDto(
     private val studio: String? = null,
     private val status: String? = null,
     private val thumbnail: String,
-    private val title: String,
+    val title: String,
     private val tags: List<HeanCmsTagDto>? = emptyList(),
-    val seasons: List<HeanCmsSeasonsDto>? = emptyList(),
+    @SerialName("alternative_names") private val alternativeNames: String? = null,
+    private val rating: Float? = null,
+    @SerialName("ratings_count") private val ratingsCount: Int? = null,
+    @SerialName("release_schedule") private val releaseSchedule: Map<String, Boolean>? = null,
+    @SerialName("release_year") private val releaseYear: String? = null,
+    private val badge: String? = null,
 ) {
+
+    // Badge text is free-form ("DOUJINSHI", "Doujinhsi", "DOUJIN")
+    fun format(): String {
+        val badge = badge?.trim()?.lowercase().orEmpty()
+        return when {
+            badge.startsWith("douj") -> "Doujinshi"
+            badge == "manga" -> "Manga"
+            else -> "Manhwa" // auto webtoon mode
+        }
+    }
 
     fun toSManga(
         cdnUrl: String,
         coverPath: String,
         mangaSubDirectory: String,
+        format: String,
     ): SManga = SManga.create().apply {
-        val descriptionBody = this@HeanCmsSeriesDto.description?.let(Jsoup::parseBodyFragment)
-
         title = this@HeanCmsSeriesDto.title
-        author = this@HeanCmsSeriesDto.author?.trim()
-        artist = this@HeanCmsSeriesDto.studio?.trim()
-        description = descriptionBody?.select("p")
-            ?.joinToString("\n\n") { it.text() }
-            ?.ifEmpty { descriptionBody.text().replace("\n", "\n\n") }
+        author = this@HeanCmsSeriesDto.author?.toCreditOrNull()
+        artist = studio?.toCreditOrNull()
+        description = buildDescription()
         genre = tags.orEmpty()
-            .sortedBy(HeanCmsTagDto::name)
-            .joinToString { it.name }
+            .map(HeanCmsTagDto::name)
+            .sorted()
+            .plus(format)
+            .joinToString()
         thumbnail_url = thumbnail.ifEmpty { null }
             ?.toAbsoluteThumbnailUrl(cdnUrl, coverPath)
         status = this@HeanCmsSeriesDto.status?.toStatus() ?: SManga.UNKNOWN
         url = "/$mangaSubDirectory/$slug#$id"
+        memo = buildJsonObject { put(FORMAT_MEMO, format) }
+    }
+
+    private fun buildDescription(): String = buildString {
+        val descriptionBody = description?.let(Jsoup::parseBodyFragment)
+        descriptionBody?.select("p")
+            ?.joinToString("\n\n") { it.text() }
+            ?.ifEmpty { descriptionBody.text().replace("\n", "\n\n") }
+            ?.takeUnless { it == "-" }
+            ?.let(::append)
+
+        val info = listOfNotNull(
+            rating?.let { rating ->
+                "Rating: %.2f".format(Locale.ROOT, rating) + (ratingsCount?.let { " ($it ratings)" } ?: "")
+            },
+            releaseSchedule
+                ?.takeIf { status == "Ongoing" }
+                ?.filterValues { it }
+                ?.keys
+                ?.mapNotNull(WEEKDAYS::get)
+                ?.sortedBy(DayOfWeek::getValue)
+                ?.takeIf { it.isNotEmpty() }
+                ?.joinToString(prefix = "Updates: ") { it.getDisplayName(TextStyle.FULL, Locale.ENGLISH) },
+            releaseYear?.takeIf { it.isNotBlank() }?.let { "Released: $it" },
+        )
+        if (info.isNotEmpty()) {
+            if (isNotEmpty()) append("\n\n")
+            info.joinTo(this, "\n")
+        }
+
+        val altNames = alternativeNames?.split("|")
+            ?.map(String::trim)
+            ?.filter { it.isNotEmpty() && it != title }
+        if (!altNames.isNullOrEmpty()) {
+            if (isNotEmpty()) append("\n\n")
+            append("Alternative names:\n")
+            altNames.joinTo(this, "\n") { "- $it" }
+        }
     }
 }
-
-@Serializable
-class HeanCmsSeasonsDto(
-    val chapters: List<HeanCmsChapterDto>? = emptyList(),
-)
 
 @Serializable
 class HeanCmsTagDto(val name: String)
@@ -111,7 +161,6 @@ class HeanCmsChapterDto(
     fun toSChapter(
         seriesSlug: String,
         mangaSubDirectory: String,
-        dateFormat: SimpleDateFormat,
     ): SChapter = SChapter.create().apply {
         name = this@HeanCmsChapterDto.name.trim()
 
@@ -123,11 +172,7 @@ class HeanCmsChapterDto(
             name += " \uD83D\uDD12"
         }
 
-        date_upload = try {
-            dateFormat.parse(createdAt)?.time ?: 0L
-        } catch (_: Exception) {
-            0L
-        }
+        date_upload = createdAt?.let { Instant.parseOrNull(it)?.toEpochMilliseconds() } ?: 0L
 
         url = "/$mangaSubDirectory/$seriesSlug/$slug#$id"
     }
@@ -145,7 +190,6 @@ class HeanCmsChapterMetaDto(
 class HeanCmsPagePayloadDto(
     val chapter: HeanCmsPageDto,
     private val paywall: Boolean = false,
-    val data: List<String>? = emptyList(),
 ) {
     fun isPaywalled() = paywall
 }
@@ -165,6 +209,12 @@ class HeanCmsGenreDto(
     val id: Int,
     val name: String,
 )
+
+const val FORMAT_MEMO = "format"
+
+private val WEEKDAYS = DayOfWeek.entries.associateBy { it.name.take(3).lowercase() }
+
+private fun String.toCreditOrNull(): String? = trim().takeUnless { it.isEmpty() || it == "-" }
 
 private fun String.toAbsoluteThumbnailUrl(cdnUrl: String, coverPath: String): String = if (startsWith("https://") || startsWith("http://")) this else "$cdnUrl/$coverPath$this"
 
