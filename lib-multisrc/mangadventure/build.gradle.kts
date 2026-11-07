@@ -1,7 +1,12 @@
-import keiyoushi.gradle.extensions.baseVersionCode
-
 plugins {
     alias(kei.plugins.multisrc)
 }
 
-baseVersionCode = 15
+keiyoushi {
+    baseVersionCode = 1
+    libVersion = "1.6"
+
+    deeplink {
+        path("/reader/..*")
+    }
+}

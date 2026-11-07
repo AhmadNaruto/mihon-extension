@@ -1,28 +1,75 @@
 package eu.kanade.tachiyomi.multisrc.comiciviewer
 
-import eu.kanade.tachiyomi.multisrc.comiciviewer.ComiciViewerAlt.Companion.LOGIN_SUFFIX
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonTransformingSerializer
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.put
 
 @Serializable
-class ViewerResponse(
-    val result: List<PageDto>,
-    val totalPages: Int,
+class RankingResponse(
+    val children: List<
+        @Serializable(RankingMangaSerializer::class)
+        Ranking,
+        >,
 )
 
 @Serializable
-class PageDto(
-    val imageUrl: String,
-    val scramble: String,
-    val sort: Int,
+class Ranking(
+    private val hash: String,
+    private val img: RankingImg,
+) {
+    fun toSManga() = SManga.create().apply {
+        url = hash
+        title = img.alt
+        thumbnail_url = img.thumbnail
+    }
+}
+
+@Serializable
+class RankingImg(
+    val alt: String,
+    private val src: String?,
+    private val srcSet: String?,
+) {
+    val thumbnail: String?
+        get() = srcSet?.substringAfterLast(", ")?.substringBefore(" ") ?: src
+}
+
+object RankingMangaSerializer : JsonTransformingSerializer<Ranking>(Ranking.serializer()) {
+    override fun transformDeserialize(element: JsonElement) = buildJsonObject {
+        val tuple = element.jsonArray
+        put("hash", tuple[2])
+        put("img", tuple.findImg()!!)
+    }
+}
+
+internal fun JsonElement.findImg(): JsonObject? = when (this) {
+    is JsonObject -> takeIf { "src" in it } ?: values.firstNotNullOfOrNull { it.findImg() }
+    is JsonArray -> firstNotNullOfOrNull { it.findImg() }
+    else -> null
+}
+
+@Serializable
+class SearchApiResponse(
+    val searchResult: SearchResult,
 )
 
 @Serializable
-class TilePos(
-    val x: Int,
-    val y: Int,
+class SearchResult(
+    val series: SeriesResult,
+)
+
+@Serializable
+class SeriesResult(
+    val total: Int,
+    val series: List<SeriesSummary>,
 )
 
 @Serializable
@@ -33,57 +80,21 @@ class ApiResponse(
 @Serializable
 class SeriesData(
     val summary: SeriesSummary,
-    private val episodes: List<Episode> = emptyList(),
-) {
-    fun toSChapter(accessMap: Map<String, EpisodeAccess>, showLocked: Boolean, showCampaignLocked: Boolean): List<SChapter> {
-        return this.episodes.mapNotNull {
-            val accessInfo = accessMap[it.id]
-            val hasAccess = accessInfo?.hasAccess
-            val isCampaign = accessInfo?.isCampaign
-            val isLocked = !hasAccess!!
-            val isCampaignLocked = isLocked && isCampaign!!
-
-            if (isCampaignLocked && !showCampaignLocked) {
-                return@mapNotNull null
-            }
-            if (isLocked && !isCampaignLocked && !showLocked) {
-                return@mapNotNull null
-            }
-
-            SChapter.create().apply {
-                name = it.title
-                date_upload = it.datePublished * 1000L
-                when {
-                    isCampaignLocked -> {
-                        name = "➡\uFE0F $name"
-                        url = "/episodes/${it.id}#$LOGIN_SUFFIX"
-                    }
-
-                    isLocked -> {
-                        name = "🔒 $name"
-                        url = "/episodes/${it.id}"
-                    }
-
-                    else -> {
-                        url = "/episodes/${it.id}"
-                    }
-                }
-            }
-        }
-    }
-}
+    val episodes: List<Episode> = emptyList(),
+)
 
 @Serializable
 class SeriesSummary(
+    private val id: String,
     private val name: String,
     private val description: String?,
     private val author: List<Author>?,
     private val images: List<SeriesImage>?,
     private val tag: List<Tag>?,
-    private val isCompleted: Boolean,
+    private val isCompleted: Boolean?,
 ) {
-    fun toSManga(seriesHash: String): SManga = SManga.create().apply {
-        url = "/series/$seriesHash"
+    fun toSManga(): SManga = SManga.create().apply {
+        url = id
         title = name
         author = this@SeriesSummary.author?.joinToString { it.name }
         artist = author
@@ -91,10 +102,9 @@ class SeriesSummary(
             ?.takeIf { it.isNotBlank() }
             ?.parseAs<List<DescriptionNode>>()
             ?.joinToString("\n") { node -> node.children.joinToString("") { it.resolveText().orEmpty() } }
-            ?: this@SeriesSummary.description
         genre = tag?.joinToString { it.name }
-        thumbnail_url = images?.joinToString { it.url }
-        status = if (isCompleted) SManga.COMPLETED else SManga.ONGOING
+        thumbnail_url = images?.firstOrNull()?.url
+        status = if (isCompleted == true) SManga.COMPLETED else SManga.ONGOING
     }
 }
 
@@ -111,13 +121,6 @@ class SeriesImage(
 @Serializable
 class Tag(
     val name: String,
-)
-
-@Serializable
-class Episode(
-    val id: String,
-    val title: String,
-    val datePublished: Long,
 )
 
 @Serializable
@@ -142,6 +145,29 @@ class DescriptionChild(
 }
 
 @Serializable
+class Episode(
+    val id: String,
+    private val title: String,
+    private val datePublished: Long?,
+) {
+    fun toSChapter(access: EpisodeAccess?): SChapter = SChapter.create().apply {
+        url = id
+        val lock = when {
+            access?.needsLogin == true -> "➡️ "
+            access?.isLocked == true -> "🔒 "
+            else -> ""
+        }
+        name = lock + title
+        datePublished?.let { date_upload = it * 1000L }
+        if (access?.needsLogin == true) {
+            memo = buildJsonObject {
+                put("login", true)
+            }
+        }
+    }
+}
+
+@Serializable
 class AccessApiResponse(
     val seriesAccess: SeriesAccess,
 )
@@ -154,48 +180,15 @@ class SeriesAccess(
 @Serializable
 class EpisodeAccess(
     val episodeId: String,
-    val hasAccess: Boolean,
-    val isCampaign: Boolean,
-)
-
-@Serializable
-class SearchApiResponse(
-    val searchResult: SearchResult,
-)
-
-@Serializable
-class SearchResult(
-    val series: SeriesResult,
-)
-
-@Serializable
-class SeriesResult(
-    val total: Int,
-    val series: List<SearchSeries>,
-)
-
-@Serializable
-class SearchSeries(
-    private val id: String,
-    private val name: String,
-    private val images: List<SeriesImage>?,
+    private val hasAccess: Boolean,
+    private val accessType: String,
 ) {
-    fun toSManga(): SManga = SManga.create().apply {
-        url = "/series/$id"
-        title = name
-        thumbnail_url = images?.joinToString { it.url }
-    }
+    val isLocked: Boolean
+        get() = !hasAccess
+
+    val needsLogin: Boolean
+        get() = isLocked && accessType == "memberOnlyFree"
 }
-
-@Serializable
-class UserInfoApiResponse(
-    val user: UserData?,
-)
-
-@Serializable
-class UserData(
-    val id: String,
-)
 
 @Serializable
 class EpisodeDetailsApiResponse(
@@ -205,10 +198,38 @@ class EpisodeDetailsApiResponse(
 @Serializable
 class EpisodeDetails(
     val content: List<EpisodeContent>,
-)
+    val contentId: Int,
+) {
+    val viewerId: String?
+        get() = content.firstOrNull { it.type == "viewer" }?.viewerId
+}
 
 @Serializable
 class EpisodeContent(
     val type: String,
-    val viewerId: String,
+    val viewerId: String?,
+    val url: String?,
+)
+
+@Serializable
+class ViewerResponse(
+    val result: List<PageDto>,
+    val totalPages: Int,
+)
+
+@Serializable
+class PageDto(
+    val imageUrl: String,
+    val scramble: String,
+    val sort: Int,
+)
+
+@Serializable
+class UserInfoApiResponse(
+    val user: UserData?,
+)
+
+@Serializable
+class UserData(
+    val id: String,
 )
