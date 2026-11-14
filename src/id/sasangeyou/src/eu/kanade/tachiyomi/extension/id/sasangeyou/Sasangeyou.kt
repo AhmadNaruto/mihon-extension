@@ -1,17 +1,10 @@
 package eu.kanade.tachiyomi.extension.id.sasangeyou
 
 import eu.kanade.tachiyomi.multisrc.mangathemesia.MangaThemesia
-import java.text.SimpleDateFormat
-import java.util.Locale
+import keiyoushi.annotation.Source
 
-class Sasangeyou :
-    MangaThemesia(
-        "Sasangeyou",
-        "https://sasangeyou.net",
-        "id",
-        "/manga",
-        dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale.forLanguageTag("id")),
-    ) {
-
+@Source
+abstract class Sasangeyou : MangaThemesia() {
+    override val datePattern = "MM/dd/yyyy"
     override val hasProjectPage = false
 }

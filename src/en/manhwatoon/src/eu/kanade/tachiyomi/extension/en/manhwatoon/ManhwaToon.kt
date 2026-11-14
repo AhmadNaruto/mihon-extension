@@ -1,14 +1,10 @@
 package eu.kanade.tachiyomi.extension.en.manhwatoon
 
 import eu.kanade.tachiyomi.multisrc.madara.Madara
+import eu.kanade.tachiyomi.multisrc.madara.MadaraBase.ChapterMode
+import keiyoushi.annotation.Source
 
-class ManhwaToon :
-    Madara(
-        "Manhwa Toon",
-        "https://www.manhwatoon.me",
-        "en",
-    ) {
-    override val useNewChapterEndpoint = true
-
-    override val useLoadMoreRequest = LoadMoreStrategy.Always
+@Source
+abstract class ManhwaToon : Madara() {
+    override val chapterMode = ChapterMode.MangaAjax
 }
