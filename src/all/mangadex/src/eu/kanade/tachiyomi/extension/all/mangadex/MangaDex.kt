@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.extension.all.mangadex
 
 import android.content.SharedPreferences
 import android.os.Build
+import android.preference.PreferenceManager
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.MultiSelectListPreference
@@ -21,83 +22,116 @@ import eu.kanade.tachiyomi.extension.all.mangadex.dto.MangaDataDto
 import eu.kanade.tachiyomi.extension.all.mangadex.dto.MangaDto
 import eu.kanade.tachiyomi.extension.all.mangadex.dto.MangaListDto
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.asObservable
-import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
+import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
+import keiyoushi.network.fetch
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.applicationContext
+import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
+import keiyoushi.utils.parseAs
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.json.JsonElement
 import okhttp3.CacheControl
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import rx.Observable
-import java.util.Date
+import java.time.LocalDate
+import java.time.ZoneOffset
 
-abstract class MangaDex(final override val lang: String, private val dexLang: String = lang) :
-    HttpSource(),
+@Source
+class MangaDex(
+    override val name: String,
+    override val lang: String,
+    override val baseUrl: String,
+    override val id: Long,
+) : KeiSource(),
     ConfigurableSource {
 
-    override val name = MangaDexIntl.MANGADEX_NAME
+    private val dexLang: String
+        get() = when (lang) {
+            "zh-Hans" -> "zh"
+            "zh-Hant" -> "zh-hk"
+            "fil" -> "tl"
+            "pt-BR" -> "pt-br"
+            "es-419" -> "es-la"
+            else -> lang
+        }
 
-    override val baseUrl = "https://mangadex.org"
-
-    override val supportsLatest = true
+    private val translatedLanguages: Set<String>
+        get() = if (dexLang == MDConstants.ALL_LANGUAGES) emptySet() else setOf(dexLang)
 
     private val preferences by getPreferencesLazy { sanitizeExistingUuidPrefs() }
 
-    private val helper = MangaDexHelper(lang)
-
-    final override fun headersBuilder(): Headers.Builder {
-        val extraHeader = "Android/${Build.VERSION.RELEASE} " +
-            "Tachiyomi/${AppInfo.getVersionName()} " +
-            "MangaDex/1.4.${BuildConfig.VERSION_CODE} " +
-            "Keiyoushi"
-
-        val builder = super.headersBuilder().apply {
-            set("User-Agent", "Tachiyomi " + System.getProperty("http.agent"))
-            set("Referer", "$baseUrl/")
-            set("Origin", baseUrl)
-            set("Extra", extraHeader)
+    @Suppress("DEPRECATION")
+    private fun isDelegate() = try {
+        val supportsDelegate = applicationContext.packageName.let {
+            it.startsWith("app.komikku") || it.startsWith("eu.kanade.tachiyomi.sy")
         }
-
-        return builder
+        PreferenceManager.getDefaultSharedPreferences(applicationContext)!!.getBoolean("eh_delegate_sources", supportsDelegate)
+    } catch (_: Throwable) {
+        false
     }
 
-    override val client = network.client.newBuilder()
-        .rateLimit(3)
-        .build()
+    private val helper = MangaDexHelper(lang)
+
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = apply {
+        val extraHeader = "Android/${Build.VERSION.RELEASE} " +
+            "Tachiyomi/${AppInfo.getVersionName()} " +
+            "MangaDex/${BuildConfig.VERSION_NAME} " +
+            "Keiyoushi"
+
+        set("User-Agent", "Tachiyomi " + System.getProperty("http.agent"))
+        set("Extra", extraHeader)
+    }
+
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(3)
 
     // Popular manga section
 
-    override fun popularMangaRequest(page: Int): Request {
+    override suspend fun getPopularManga(page: Int): MangasPage {
         val url = MDConstants.API_MANGA_URL.toHttpUrl().newBuilder()
             .addQueryParameter("order[followedCount]", "desc")
-            .addQueryParameter("availableTranslatedLanguage[]", dexLang)
+            .addQueryParameter("hasAvailableChapters", "true")
+            .addQueryParameter("availableTranslatedLanguage[]", translatedLanguages)
             .addQueryParameter("limit", MDConstants.MANGA_LIMIT.toString())
             .addQueryParameter("offset", helper.getMangaListOffset(page))
             .addQueryParameter("includes[]", MDConstants.COVER_ART)
             .addQueryParameter("contentRating[]", preferences.contentRating)
             .addQueryParameter("originalLanguage[]", preferences.originalLanguages)
+            .addQueryParameter(
+                "createdAtSince",
+                LocalDate
+                    .now()
+                    .minusDays(30)
+                    .atStartOfDay()
+                    .atZone(ZoneOffset.UTC)
+                    .format(MDConstants.dateFormatterNoOffset),
+            )
             .build()
 
-        return GET(url, headers, CacheControl.FORCE_NETWORK)
+        return parseMangasPage(client.get(url, Fetch.XHR))
     }
 
-    override fun popularMangaParse(response: Response): MangasPage {
+    private fun parseMangasPage(response: Response): MangasPage {
         if (response.code == 204) {
             return MangasPage(emptyList(), false)
         }
 
-        val mangaListDto = response.parseAs<MangaListDto>()
+        val mangaListDto = response.parseAs<MangaListDto>(helper.json)
 
         val coverSuffix = preferences.coverQuality
         val firstVolumeCovers = fetchFirstVolumeCovers(mangaListDto.data).orEmpty()
@@ -116,34 +150,47 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
 
     // Latest manga section
 
-    override fun latestUpdatesRequest(page: Int): Request {
-        val url = MDConstants.API_CHAPTER_URL.toHttpUrl().newBuilder()
-            .addQueryParameter("offset", helper.getLatestChapterOffset(page))
-            .addQueryParameter("limit", MDConstants.LATEST_CHAPTER_LIMIT.toString())
-            .addQueryParameter("translatedLanguage[]", dexLang)
-            .addQueryParameter("order[publishAt]", "desc")
-            .addQueryParameter("includeFutureUpdates", "0")
-            .addQueryParameter("originalLanguage[]", preferences.originalLanguages)
-            .addQueryParameter("contentRating[]", preferences.contentRating)
-            .addQueryParameter(
-                "excludedGroups[]",
-                MDConstants.defaultBlockedGroups + preferences.blockedGroups,
-            )
-            .addQueryParameter("excludedUploaders[]", preferences.blockedUploaders)
-            .addQueryParameter("includeFuturePublishAt", "0")
-            .addQueryParameter("includeEmptyPages", "0")
-            .build()
+    private fun latestUpdatesUrl(page: Int): HttpUrl = MDConstants.API_CHAPTER_URL.toHttpUrl().newBuilder()
+        .addQueryParameter("offset", helper.getLatestChapterOffset(page))
+        .addQueryParameter("limit", MDConstants.LATEST_CHAPTER_LIMIT.toString())
+        .addQueryParameter("translatedLanguage[]", translatedLanguages)
+        .addQueryParameter("order[publishAt]", "desc")
+        .addQueryParameter(
+            "includeFutureUpdates",
+            if (isDelegate()) {
+                "1"
+            } else {
+                "0"
+            },
+        )
+        .addQueryParameter("originalLanguage[]", preferences.originalLanguages)
+        .addQueryParameter("contentRating[]", preferences.contentRating)
+        .addQueryParameter(
+            "excludedGroups[]",
+            MDConstants.defaultBlockedGroups + preferences.blockedGroups,
+        )
+        .addQueryParameter("excludedUploaders[]", preferences.blockedUploaders)
+        .addQueryParameter("includeFuturePublishAt", "0")
+        .addQueryParameter("includeEmptyPages", "0")
+        .build()
 
-        return GET(url, headers, CacheControl.FORCE_NETWORK)
-    }
+    override suspend fun getLatestUpdates(page: Int): MangasPage = latestUpdatesParse(client.get(latestUpdatesUrl(page), Fetch.XHR, CacheControl.FORCE_NETWORK))
+
+    /**
+     * Used by Komikku
+     */
+    fun latestUpdatesRequest(page: Int): Request = GET(latestUpdatesUrl(page), headers, CacheControl.FORCE_NETWORK).newBuilder().fetch(Fetch.XHR).build()
 
     /**
      * The API endpoint can't sort by date yet, so not implemented.
+     *
+     * Used by Komikku
      */
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val chapterListDto = response.parseAs<ChapterListDto>()
+    fun latestUpdatesParse(response: Response): MangasPage {
+        val chapterListDto = response.parseAs<ChapterListDto>(helper.json)
 
         val mangaIds = chapterListDto.data
+            .asSequence()
             .flatMap { it.relationships }
             .filterIsInstance<MangaDataDto>()
             .map { it.id }
@@ -157,9 +204,9 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             .addQueryParameter("ids[]", mangaIds)
             .build()
 
-        val mangaRequest = GET(mangaApiUrl, headers, CacheControl.FORCE_NETWORK)
+        val mangaRequest = GET(mangaApiUrl, headers, CacheControl.FORCE_NETWORK).newBuilder().fetch(Fetch.XHR).build()
         val mangaResponse = client.newCall(mangaRequest).execute()
-        val mangaListDto = mangaResponse.parseAs<MangaListDto>()
+        val mangaListDto = mangaResponse.parseAs<MangaListDto>(helper.json)
         val firstVolumeCovers = fetchFirstVolumeCovers(mangaListDto.data).orEmpty()
 
         val mangaDtoMap = mangaListDto.data.associateBy({ it.id }, { it })
@@ -180,67 +227,79 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
 
     // Search manga section
 
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
-        var newQuery = query
-        val url = query.trim().toHttpUrlOrNull()
-        if (url != null && url.host.endsWith("mangadex.org")) {
+    override suspend fun getMangasByUrl(url: HttpUrl, page: Int): MangasPage {
+        if (url.host.endsWith("mangadex.org")) {
             val searchPrefix = url.pathSegments.firstOrNull()?.let { MDConstants.pathToSearchPrefix[it] }
             if (searchPrefix != null) {
                 val match = MDConstants.uuidRegex.find(url.toString())
                 if (match != null) {
-                    newQuery = searchPrefix + match.value
+                    return getSearchMangaList(page, searchPrefix + match.value, FilterList())
                 }
             }
         }
-
-        return when {
-            newQuery.startsWith(MDConstants.PREFIX_CH_SEARCH) ->
-                getMangaIdFromChapterId(newQuery.removePrefix(MDConstants.PREFIX_CH_SEARCH))
-                    .flatMap { mangaId ->
-                        super.fetchSearchManga(
-                            page = page,
-                            query = MDConstants.PREFIX_ID_SEARCH + mangaId,
-                            filters = filters,
-                        )
-                    }
-
-            newQuery.startsWith(MDConstants.PREFIX_USER_SEARCH) ->
-                client
-                    .newCall(
-                        request = searchMangaUploaderRequest(
-                            page = page,
-                            uploader = newQuery.removePrefix(MDConstants.PREFIX_USER_SEARCH),
-                        ),
-                    )
-                    .asObservableSuccess()
-                    .map { latestUpdatesParse(it) }
-
-            newQuery.startsWith(MDConstants.PREFIX_LIST_SEARCH) ->
-                client
-                    .newCall(
-                        request = searchMangaListRequest(
-                            list = newQuery.removePrefix(MDConstants.PREFIX_LIST_SEARCH),
-                        ),
-                    )
-                    .asObservableSuccess()
-                    .map { searchMangaListParse(it, page, filters) }
-
-            else -> super.fetchSearchManga(page, newQuery.trim(), filters)
-        }
+        return getSearchMangaList(page, url.toString(), FilterList())
     }
 
-    private fun getMangaIdFromChapterId(id: String): Observable<String> = client.newCall(GET("${MDConstants.API_CHAPTER_URL}/$id", headers))
-        .asObservable()
-        .map { response ->
-            if (response.isSuccessful.not()) {
-                throw Exception(helper.intl.format("unable_to_process_chapter_request", response.code))
-            }
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = when {
+        query.startsWith(MDConstants.PREFIX_CH_SEARCH) ->
+            client
+                .get(
+                    url = searchMangaUrl(
+                        page = page,
+                        query = MDConstants.PREFIX_ID_SEARCH + getMangaIdFromChapterId(query.removePrefix(MDConstants.PREFIX_CH_SEARCH)),
+                        filters = filters,
+                    ),
+                    fetch = Fetch.XHR,
+                    cacheControl = CacheControl.FORCE_NETWORK,
+                )
+                .let(::parseMangasPage)
 
-            response.parseAs<ChapterDto>().data!!.relationships
-                .firstInstanceOrNull<MangaDataDto>()!!.id
+        query.startsWith(MDConstants.PREFIX_USER_SEARCH) ->
+            client
+                .get(
+                    url = searchMangaUploaderUrl(
+                        page = page,
+                        uploader = query.removePrefix(MDConstants.PREFIX_USER_SEARCH),
+                    ),
+                    fetch = Fetch.XHR,
+                    cacheControl = CacheControl.FORCE_NETWORK,
+                )
+                .let(::latestUpdatesParse)
+
+        query.startsWith(MDConstants.PREFIX_LIST_SEARCH) ->
+            client
+                .get(
+                    url = "${MDConstants.API_LIST_URL}/${query.removePrefix(MDConstants.PREFIX_LIST_SEARCH)}",
+                    fetch = Fetch.XHR,
+                    cacheControl = CacheControl.FORCE_NETWORK,
+                )
+                .let { searchMangaListParse(it, page, filters) }
+
+        else ->
+            client
+                .get(
+                    url = searchMangaUrl(
+                        page = page,
+                        query = query.trim(),
+                        filters = filters,
+                    ),
+                    fetch = Fetch.XHR,
+                    cacheControl = CacheControl.FORCE_NETWORK,
+                )
+                .let(::parseMangasPage)
+    }
+
+    private suspend fun getMangaIdFromChapterId(id: String): String {
+        val response = client.get("${MDConstants.API_CHAPTER_URL}/$id", Fetch.XHR, ensureSuccess = false)
+
+        if (!response.isSuccessful) {
+            throw Exception(helper.intl.format("unable_to_process_chapter_request", response.code))
         }
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+        return response.parseAs<ChapterDto>(helper.json).data!!.relationships.firstInstanceOrNull<MangaDataDto>()!!.id
+    }
+
+    private fun searchMangaUrl(page: Int, query: String, filters: FilterList): HttpUrl {
         if (query.startsWith(MDConstants.PREFIX_ID_SEARCH)) {
             val mangaId = query.removePrefix(MDConstants.PREFIX_ID_SEARCH)
 
@@ -254,7 +313,7 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
                 .addQueryParameter("contentRating[]", MDConstants.allContentRatings)
                 .build()
 
-            return GET(url, headers, CacheControl.FORCE_NETWORK)
+            return url
         }
 
         val tempUrl = MDConstants.API_MANGA_URL.toHttpUrl().newBuilder()
@@ -292,21 +351,15 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             }
         }
 
-        val finalUrl = helper.mdFilters.addFiltersToUrl(
+        return helper.mdFilters.addFiltersToUrl(
             url = tempUrl,
             filters = filters.ifEmpty { getFilterList() },
             dexLang = dexLang,
         )
-
-        return GET(finalUrl, headers, CacheControl.FORCE_NETWORK)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
-
-    private fun searchMangaListRequest(list: String): Request = GET("${MDConstants.API_LIST_URL}/$list", headers, CacheControl.FORCE_NETWORK)
-
-    private fun searchMangaListParse(response: Response, page: Int, filters: FilterList): MangasPage {
-        val listDto = response.parseAs<ListDto>()
+    private suspend fun searchMangaListParse(response: Response, page: Int, filters: FilterList): MangasPage {
+        val listDto = response.parseAs<ListDto>(helper.json)
         val listDtoFiltered = listDto.data!!.relationships.filterIsInstance<MangaDataDto>()
         val amount = listDtoFiltered.count()
 
@@ -334,9 +387,7 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             dexLang = dexLang,
         )
 
-        val mangaRequest = GET(finalUrl, headers, CacheControl.FORCE_NETWORK)
-        val mangaResponse = client.newCall(mangaRequest).execute()
-        val mangaList = searchMangaListParse(mangaResponse)
+        val mangaList = searchMangaListParse(client.get(finalUrl, Fetch.XHR, CacheControl.FORCE_NETWORK))
 
         val hasNextPage = amount.toFloat() / MDConstants.MANGA_LIMIT - (page.toFloat() - 1) > 1 &&
             ids.size == MDConstants.MANGA_LIMIT
@@ -345,14 +396,7 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
     }
 
     private fun searchMangaListParse(response: Response): List<SManga> {
-        // This check will be used as the source is doing additional requests to this
-        // that are not parsed by the asObservableSuccess() method. It should throw the
-        // HttpException from the app if it becomes available in a future version of extensions-lib.
-        if (response.isSuccessful.not()) {
-            throw Exception("HTTP error ${response.code}")
-        }
-
-        val mangaListDto = response.parseAs<MangaListDto>()
+        val mangaListDto = response.parseAs<MangaListDto>(helper.json)
         val firstVolumeCovers = fetchFirstVolumeCovers(mangaListDto.data).orEmpty()
 
         val coverSuffix = preferences.coverQuality
@@ -369,27 +413,30 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
         return mangaList
     }
 
-    private fun searchMangaUploaderRequest(page: Int, uploader: String): Request {
-        val url = MDConstants.API_CHAPTER_URL.toHttpUrl().newBuilder()
-            .addQueryParameter("offset", helper.getLatestChapterOffset(page))
-            .addQueryParameter("limit", MDConstants.LATEST_CHAPTER_LIMIT.toString())
-            .addQueryParameter("translatedLanguage[]", dexLang)
-            .addQueryParameter("order[publishAt]", "desc")
-            .addQueryParameter("includeFutureUpdates", "0")
-            .addQueryParameter("includeFuturePublishAt", "0")
-            .addQueryParameter("includeEmptyPages", "0")
-            .addQueryParameter("uploader", uploader)
-            .addQueryParameter("originalLanguage[]", preferences.originalLanguages)
-            .addQueryParameter("contentRating[]", preferences.contentRating)
-            .addQueryParameter(
-                "excludedGroups[]",
-                MDConstants.defaultBlockedGroups + preferences.blockedGroups,
-            )
-            .addQueryParameter("excludedUploaders[]", preferences.blockedUploaders)
-            .build()
-
-        return GET(url, headers, CacheControl.FORCE_NETWORK)
-    }
+    private fun searchMangaUploaderUrl(page: Int, uploader: String): HttpUrl = MDConstants.API_CHAPTER_URL.toHttpUrl().newBuilder()
+        .addQueryParameter("offset", helper.getLatestChapterOffset(page))
+        .addQueryParameter("limit", MDConstants.LATEST_CHAPTER_LIMIT.toString())
+        .addQueryParameter("translatedLanguage[]", translatedLanguages)
+        .addQueryParameter("order[publishAt]", "desc")
+        .addQueryParameter(
+            "includeFutureUpdates",
+            if (isDelegate()) {
+                "1"
+            } else {
+                "0"
+            },
+        )
+        .addQueryParameter("includeFuturePublishAt", "0")
+        .addQueryParameter("includeEmptyPages", "0")
+        .addQueryParameter("uploader", uploader)
+        .addQueryParameter("originalLanguage[]", preferences.originalLanguages)
+        .addQueryParameter("contentRating[]", preferences.contentRating)
+        .addQueryParameter(
+            "excludedGroups[]",
+            MDConstants.defaultBlockedGroups + preferences.blockedGroups,
+        )
+        .addQueryParameter("excludedUploaders[]", preferences.blockedUploaders)
+        .build()
 
     // Manga Details section
 
@@ -400,26 +447,26 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
      *
      * @throws Exception if the url is the old format so people migrate
      */
-    override fun mangaDetailsRequest(manga: SManga): Request {
-        if (!helper.containsUuid(manga.url.trim())) {
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga {
+        if (!helper.containsUuid(url.toString())) {
             throw Exception(helper.intl["migrate_warning"])
         }
 
-        val url = (MDConstants.API_URL + manga.url).toHttpUrl().newBuilder()
-            .addQueryParameter("includes[]", MDConstants.COVER_ART)
-            .addQueryParameter("includes[]", MDConstants.AUTHOR)
-            .addQueryParameter("includes[]", MDConstants.ARTIST)
-            .build()
-
-        return GET(url, headers, CacheControl.FORCE_NETWORK)
-    }
-
-    override fun mangaDetailsParse(response: Response): SManga {
-        val manga = response.parseAs<MangaDto>()
+        val manga = client.get(
+            url = "${MDConstants.API_URL}/manga/${url.pathSegments[1]}"
+                .toHttpUrl()
+                .newBuilder()
+                .addQueryParameter("includes[]", MDConstants.COVER_ART)
+                .addQueryParameter("includes[]", MDConstants.AUTHOR)
+                .addQueryParameter("includes[]", MDConstants.ARTIST)
+                .build(),
+            fetch = Fetch.XHR,
+            cacheControl = CacheControl.FORCE_NETWORK,
+        ).parseAs<MangaDto>(helper.json)
 
         return helper.createManga(
             manga.data!!,
-            fetchSimpleChapterList(manga, dexLang),
+            fetchSimpleChapterList(manga),
             fetchFirstVolumeCover(manga),
             dexLang,
             preferences.coverQuality,
@@ -436,11 +483,13 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
      * @see MangaDexHelper.getPublicationStatus
      * @see AggregateDto
      */
-    private fun fetchSimpleChapterList(manga: MangaDto, langCode: String): Map<String, AggregateVolume> {
-        val url = "${MDConstants.API_MANGA_URL}/${manga.data!!.id}/aggregate?translatedLanguage[]=$langCode"
-        val response = client.newCall(GET(url, headers)).execute()
+    private suspend fun fetchSimpleChapterList(manga: MangaDto): Map<String, AggregateVolume> {
+        val url = "${MDConstants.API_MANGA_URL}/${manga.data!!.id}/aggregate".toHttpUrl().newBuilder()
+            .addQueryParameter("translatedLanguage[]", translatedLanguages)
+            .build()
+        val response = client.get(url, Fetch.XHR, ensureSuccess = false)
 
-        return runCatching { response.parseAs<AggregateDto>() }
+        return runCatching { response.parseAs<AggregateDto>(helper.json) }
             .getOrNull()?.volumes.orEmpty()
     }
 
@@ -477,7 +526,7 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             .build()
 
         val result = runCatching {
-            client.newCall(GET(apiUrl, headers)).execute().parseAs<CoverArtListDto>().data
+            client.newCall(GET(apiUrl, headers).newBuilder().fetch(Fetch.XHR).build()).execute().parseAs<CoverArtListDto>(helper.json).data
         }
 
         val covers = result.getOrNull() ?: return null
@@ -498,34 +547,17 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
      *
      * @throws Exception if the url is the old format so people migrate
      */
-    override fun chapterListRequest(manga: SManga): Request {
+    private suspend fun getChapterList(manga: SManga): List<SChapter> {
         if (!helper.containsUuid(manga.url)) {
             throw Exception(helper.intl["migrate_warning"])
         }
 
-        return paginatedChapterListRequest(helper.getUUIDFromUrl(manga.url), 0)
-    }
-
-    /**
-     * Required because the chapter list API endpoint is paginated.
-     */
-    private fun paginatedChapterListRequest(mangaId: String, offset: Int): Request {
-        val url = helper.getChapterEndpoint(mangaId, offset, dexLang).toHttpUrl().newBuilder()
-            .addQueryParameter("contentRating[]", MDConstants.allContentRatings)
-            .addQueryParameter("excludedGroups[]", preferences.blockedGroups)
-            .addQueryParameter("excludedUploaders[]", preferences.blockedUploaders)
-            .addQueryParameter("includeUnavailable", if (preferences.includeUnavailable) "1" else "0")
-            .build()
-
-        return GET(url, headers, CacheControl.FORCE_NETWORK)
-    }
-
-    override fun chapterListParse(response: Response): List<SChapter> {
+        val response = client.get(paginatedChapterListUrl(helper.getUUIDFromUrl(manga.url), 0), Fetch.XHR, CacheControl.FORCE_NETWORK)
         if (response.code == 204) {
             return emptyList()
         }
 
-        val chapterListResponse = response.parseAs<ChapterListDto>()
+        val chapterListResponse = response.parseAs<ChapterListDto>(helper.json)
 
         val chapterListResults = chapterListResponse.data.toMutableList()
 
@@ -541,9 +573,8 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
         while (hasNextPage) {
             offset += chapterListResponse.limit
 
-            val newRequest = paginatedChapterListRequest(mangaId, offset)
-            val newResponse = client.newCall(newRequest).execute()
-            val newChapterList = newResponse.parseAs<ChapterListDto>()
+            val newResponse = client.get(paginatedChapterListUrl(mangaId, offset), Fetch.XHR, CacheControl.FORCE_NETWORK)
+            val newChapterList = newResponse.parseAs<ChapterListDto>(helper.json)
             chapterListResults.addAll(newChapterList.data)
 
             hasNextPage = newChapterList.hasNextPage
@@ -554,30 +585,38 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             .map(helper::createChapter)
     }
 
+    /**
+     * Required because the chapter list API endpoint is paginated.
+     */
+    private fun paginatedChapterListUrl(mangaId: String, offset: Int): HttpUrl = helper.getChapterEndpoint(mangaId, offset).toHttpUrl().newBuilder()
+        .addQueryParameter("translatedLanguage[]", translatedLanguages)
+        .addQueryParameter("contentRating[]", MDConstants.allContentRatings)
+        .addQueryParameter("excludedGroups[]", preferences.blockedGroups)
+        .addQueryParameter("excludedUploaders[]", preferences.blockedUploaders)
+        .addQueryParameter("includeUnavailable", if (preferences.includeUnavailable) "1" else "0")
+        .build()
+
     override fun getChapterUrl(chapter: SChapter): String = baseUrl + chapter.url
 
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         if (!helper.containsUuid(chapter.url)) {
             throw Exception(helper.intl["migrate_warning"])
         }
 
         val chapterId = chapter.url.substringAfter("/chapter/")
-        val atHomeRequestUrl = if (preferences.forceStandardHttps) {
+        val url = if (preferences.forceStandardHttps) {
             "${MDConstants.API_URL}/at-home/server/$chapterId?forcePort443=true"
         } else {
             "${MDConstants.API_URL}/at-home/server/$chapterId"
-        }
+        }.also(helper::mdAtHomeRefresh).toHttpUrl()
 
-        return helper.mdAtHomeRequest(atHomeRequestUrl, headers, CacheControl.FORCE_NETWORK)
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
+        val response = client.get(url, Fetch.XHR, CacheControl.FORCE_NETWORK)
         val atHomeRequestUrl = response.request.url
-        val atHomeDto = response.parseAs<AtHomeDto>()
+        val atHomeDto = response.parseAs<AtHomeDto>(helper.json)
         val host = atHomeDto.baseUrl
 
         // Have to add the time, and url to the page because pages timeout within 30 minutes now.
-        val now = Date().time
+        val now = System.currentTimeMillis()
 
         val hash = atHomeDto.chapter.hash
         val pageSuffix = if (preferences.useDataSaver) {
@@ -592,11 +631,8 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
         }
     }
 
-    override fun imageRequest(page: Page): Request = helper.getValidImageUrlForPage(page, headers, client)
+    override fun getImageRequest(page: Page): Request = helper.getValidImageUrlForPage(page, headers, client)
 
-    override fun imageUrlParse(response: Response): String = ""
-
-    @Suppress("UNCHECKED_CAST")
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         val coverQualityPref = ListPreference(screen.context).apply {
             key = MDConstants.getCoverQualityPreferenceKey(dexLang)
@@ -605,16 +641,6 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             entryValues = MDConstants.getCoverQualityPreferenceEntryValues()
             setDefaultValue(MDConstants.getCoverQualityPreferenceDefaultValue())
             summary = "%s"
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val selected = newValue as String
-                val index = findIndexOfValue(selected)
-                val entry = entryValues[index] as String
-
-                preferences.edit()
-                    .putString(MDConstants.getCoverQualityPreferenceKey(dexLang), entry)
-                    .commit()
-            }
         }
 
         val tryUsingFirstVolumeCoverPref = SwitchPreferenceCompat(screen.context).apply {
@@ -622,14 +648,6 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             title = helper.intl["try_using_first_volume_cover"]
             summary = helper.intl["try_using_first_volume_cover_summary"]
             setDefaultValue(MDConstants.TRY_USING_FIRST_VOLUME_COVER_DEFAULT)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val checkValue = newValue as Boolean
-
-                preferences.edit()
-                    .putBoolean(MDConstants.getTryUsingFirstVolumeCoverPrefKey(dexLang), checkValue)
-                    .commit()
-            }
         }
 
         val dataSaverPref = SwitchPreferenceCompat(screen.context).apply {
@@ -637,14 +655,6 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             title = helper.intl["data_saver"]
             summary = helper.intl["data_saver_summary"]
             setDefaultValue(false)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val checkValue = newValue as Boolean
-
-                preferences.edit()
-                    .putBoolean(MDConstants.getDataSaverPreferenceKey(dexLang), checkValue)
-                    .commit()
-            }
         }
 
         val standardHttpsPortPref = SwitchPreferenceCompat(screen.context).apply {
@@ -652,14 +662,6 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             title = helper.intl["standard_https_port"]
             summary = helper.intl["standard_https_port_summary"]
             setDefaultValue(false)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val checkValue = newValue as Boolean
-
-                preferences.edit()
-                    .putBoolean(MDConstants.getStandardHttpsPreferenceKey(dexLang), checkValue)
-                    .commit()
-            }
         }
 
         val contentRatingPref = MultiSelectListPreference(screen.context).apply {
@@ -679,14 +681,6 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
                 MDConstants.CONTENT_RATING_PREF_VAL_PORNOGRAPHIC,
             )
             setDefaultValue(MDConstants.contentRatingPrefDefaults)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val checkValue = newValue as Set<String>
-
-                preferences.edit()
-                    .putStringSet(MDConstants.getContentRatingPrefKey(dexLang), checkValue)
-                    .commit()
-            }
         }
 
         val originalLanguagePref = MultiSelectListPreference(screen.context).apply {
@@ -704,14 +698,6 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
                 MDConstants.ORIGINAL_LANGUAGE_PREF_VAL_KOREAN,
             )
             setDefaultValue(MDConstants.originalLanguagePrefDefaults)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val checkValue = newValue as Set<String>
-
-                preferences.edit()
-                    .putStringSet(MDConstants.getOriginalLanguagePrefKey(dexLang), checkValue)
-                    .commit()
-            }
         }
 
         val blockedGroupsPref = EditTextPreference(screen.context).apply {
@@ -720,12 +706,6 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             summary = helper.intl["block_group_by_uuid_summary"]
 
             setOnBindEditTextListener(helper::setupEditTextUuidValidator)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                preferences.edit()
-                    .putString(MDConstants.getBlockedGroupsPrefKey(dexLang), newValue.toString())
-                    .commit()
-            }
         }
 
         val blockedUploaderPref = EditTextPreference(screen.context).apply {
@@ -734,12 +714,6 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             summary = helper.intl["block_uploader_by_uuid_summary"]
 
             setOnBindEditTextListener(helper::setupEditTextUuidValidator)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                preferences.edit()
-                    .putString(MDConstants.getBlockedUploaderPrefKey(dexLang), newValue.toString())
-                    .commit()
-            }
         }
 
         val altTitlesInDescPref = SwitchPreferenceCompat(screen.context).apply {
@@ -747,14 +721,6 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             title = helper.intl["alternative_titles_in_description"]
             summary = helper.intl["alternative_titles_in_description_summary"]
             setDefaultValue(false)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val checkValue = newValue as Boolean
-
-                preferences.edit()
-                    .putBoolean(MDConstants.getAltTitlesInDescPrefKey(dexLang), checkValue)
-                    .commit()
-            }
         }
 
         val preferExtensionLangTitlePref = SwitchPreferenceCompat(screen.context).apply {
@@ -762,14 +728,6 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             title = helper.intl["prefer_title_in_extension_language"]
             summary = helper.intl["prefer_title_in_extension_language_summary"]
             setDefaultValue(true)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val checkValue = newValue as Boolean
-
-                preferences.edit()
-                    .putBoolean(MDConstants.getPreferExtensionLangTitlePrefKey(dexLang), checkValue)
-                    .commit()
-            }
         }
 
         val finalChapterInDescPref = SwitchPreferenceCompat(screen.context).apply {
@@ -777,14 +735,6 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             title = helper.intl["final_chapter_in_description"]
             summary = helper.intl["final_chapter_in_description_summary"]
             setDefaultValue(true)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val checkValue = newValue as Boolean
-
-                preferences.edit()
-                    .putBoolean(MDConstants.getFinalChapterInDescPrefKey(dexLang), checkValue)
-                    .commit()
-            }
         }
 
         val includeUnavailablePref = SwitchPreferenceCompat(screen.context).apply {
@@ -792,14 +742,6 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
             title = helper.intl["include_unavailable"]
             summary = helper.intl["include_unavailable_summary"]
             setDefaultValue(false)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val checkValue = newValue as Boolean
-
-                preferences.edit()
-                    .putBoolean(MDConstants.getIncludeUnavailablePrefKey(dexLang), checkValue)
-                    .commit()
-            }
         }
 
         screen.addPreference(coverQualityPref)
@@ -816,17 +758,27 @@ abstract class MangaDex(final override val lang: String, private val dexLang: St
         screen.addPreference(blockedUploaderPref)
     }
 
-    override fun getFilterList(): FilterList = helper.mdFilters.getMDFilterList(preferences, dexLang, helper.intl)
+    override fun getFilterList(data: JsonElement?): FilterList = helper.mdFilters.getMDFilterList(preferences, dexLang, helper.intl)
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = coroutineScope {
+        val mangaDeferred = async {
+            if (fetchDetails) getMangaByUrl(getMangaUrl(manga).toHttpUrl()) else manga
+        }
+        val chaptersDeferred = async {
+            if (fetchChapters) getChapterList(manga) else chapters
+        }
+
+        SMangaUpdate(mangaDeferred.await(), chaptersDeferred.await())
+    }
 
     private fun HttpUrl.Builder.addQueryParameter(name: String, value: Set<String>?) = apply {
         value?.forEach { addQueryParameter(name, it) }
     }
-
-    private inline fun <reified T> Response.parseAs(): T = use {
-        helper.json.decodeFromString(body.string())
-    }
-
-    private inline fun <reified T> List<*>.firstInstanceOrNull(): T? = firstOrNull { it is T } as? T?
 
     private val SharedPreferences.contentRating
         get() = getStringSet(

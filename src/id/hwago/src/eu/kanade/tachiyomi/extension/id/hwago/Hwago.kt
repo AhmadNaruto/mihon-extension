@@ -1,19 +1,7 @@
 package eu.kanade.tachiyomi.extension.id.hwago
 
-import eu.kanade.tachiyomi.multisrc.madara.Madara
-import java.text.SimpleDateFormat
-import java.util.Locale
+import eu.kanade.tachiyomi.multisrc.hwalumi.Hwalumi
+import keiyoushi.annotation.Source
 
-class Hwago :
-    Madara(
-        "Hwago",
-        "https://01.hwago.xyz",
-        "id",
-        dateFormat = SimpleDateFormat("d MMMM yyyy", Locale("en")),
-    ) {
-    override val useNewChapterEndpoint = true
-
-    override val mangaDetailsSelectorStatus = "div.summary-heading:contains(Status) + div.summary-content"
-
-    override val mangaSubString = "komik"
-}
+@Source
+abstract class Hwago : Hwalumi()
