@@ -1,114 +1,98 @@
 package eu.kanade.tachiyomi.multisrc.mangacatalog
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
-import okhttp3.Request
-import okhttp3.Response
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
+import keiyoushi.network.Fetch
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
+import keiyoushi.utils.attrOrNull
+import keiyoushi.utils.textOrNull
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import rx.Observable
 
 // Based On the original manga maniac source
 // MangaCatalog is a network of sites for single franshise sites
 
-abstract class MangaCatalog(
-    override val name: String,
-    override val baseUrl: String,
-    override val lang: String,
-) : HttpSource() {
-
-    override fun headersBuilder() = super.headersBuilder()
-        .set("Referer", "$baseUrl/")
+abstract class MangaCatalog : KeiSource() {
 
     open val sourceList = listOf(
-        Pair(name, baseUrl),
+        name to baseUrl,
     ).sortedBy { it.first }.distinctBy { it.second }
 
-    // Info
+    override val supportsLatest = false
 
-    override val supportsLatest: Boolean = false
-
-    // Popular
-    override fun fetchPopularManga(page: Int): Observable<MangasPage> = Observable.just(
-        MangasPage(sourceList.map { popularMangaFromPair(it.first, it.second) }, false),
-    )
+    override suspend fun getPopularManga(page: Int): MangasPage = MangasPage(sourceList.map { popularMangaFromPair(it.first, it.second) }, false)
 
     private fun popularMangaFromPair(name: String, sourceurl: String): SManga = SManga.create().apply {
         title = name
         url = sourceurl
     }
 
-    override fun popularMangaRequest(page: Int): Request = throw UnsupportedOperationException()
-    override fun popularMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()
+    override suspend fun getLatestUpdates(page: Int): MangasPage = throw UnsupportedOperationException()
 
-    // Latest
-    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
-    override fun latestUpdatesParse(response: Response): MangasPage = throw UnsupportedOperationException()
-
-    // Search
-
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
-        val mangas = sourceList.filter {
-            it.first.contains(query, ignoreCase = true)
-        }.map {
-            popularMangaFromPair(it.first, it.second)
+    // Romaji titles are only in the slugs
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val slugQuery = query.trim().replace(' ', '-')
+        val mangas = sourceList.filter { (name, mangaUrl) ->
+            name.contains(query, ignoreCase = true) ||
+                mangaUrl.toHttpUrl().pathSegments.getOrNull(1)?.contains(slugQuery, ignoreCase = true) == true
+        }.map { (name, mangaUrl) ->
+            popularMangaFromPair(name, mangaUrl)
         }
-        return Observable.just(MangasPage(mangas, false))
+        return MangasPage(mangas, false)
     }
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList) = throw UnsupportedOperationException()
-    override fun searchMangaParse(response: Response) = throw UnsupportedOperationException()
-
-    // Get Override
-
-    override fun mangaDetailsRequest(manga: SManga): Request = GET(manga.url, headers)
-    override fun chapterListRequest(manga: SManga): Request = GET(manga.url, headers)
-    override fun pageListRequest(chapter: SChapter): Request = GET(chapter.url, headers)
-
-    // Details
-
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
-        return SManga.create().apply {
-            val info = document.select("div.bg-bg-secondary > div.px-6 > div.flex-col").text()
-            title = document.select("div.container > h1").text()
-            description = if ("Description" in info) info.substringAfter("Description").trim() else info
-            thumbnail_url = document.select("div.flex > img").attr("abs:src")
-        }
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+        val path = url.encodedPath.removeSuffix("/")
+        return sourceList.firstOrNull { it.second.toHttpUrl().encodedPath.removeSuffix("/") == path }
+            ?.let { (name, mangaUrl) -> popularMangaFromPair(name, mangaUrl) }
     }
 
-    // Chapters
+    // Manga and chapter URLs are stored as absolute URLs
+    override fun getMangaUrl(manga: SManga): String = manga.url
+
+    override fun getChapterUrl(chapter: SChapter): String = chapter.url
+
+    // Details and chapters come from the same page
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(getMangaUrl(manga), Fetch.DOCUMENT).asJsoup()
+        return SMangaUpdate(mangaDetailsParse(document), chapterListParse(document))
+    }
+
+    open fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
+        val info = document.selectFirst("div.bg-bg-secondary > div.px-6 > div.flex-col")?.textOrNull()
+        title = document.selectFirst("div.container > h1")!!.text()
+        description = info?.substringAfter("Description")?.trim()
+        thumbnail_url = document.selectFirst("div.flex > img")?.attrOrNull("abs:src")
+    }
 
     open fun chapterListSelector(): String = "div.w-full > div.bg-bg-secondary > div.grid"
 
     open fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
-        val name1 = element.select(".col-span-4 > a").text()
-        val name2 = element.select(".text-xs:not(a)").text()
-        name = if (name2.isEmpty()) {
-            name1
-        } else {
-            "$name1 - $name2"
-        }
-        url = element.select(".col-span-4 > a").attr("abs:href")
+        val link = element.selectFirst(".col-span-4 > a")!!
+        val subtitle = element.selectFirst(".text-xs:not(a)")?.textOrNull()
+        name = listOfNotNull(link.text(), subtitle).joinToString(" - ")
+        url = link.absUrl("href")
     }
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
-        return document.select(chapterListSelector()).map { chapterFromElement(it) }
-    }
+    private fun chapterListParse(document: Document): List<SChapter> = document.select(chapterListSelector()).map { chapterFromElement(it) }
 
-    // Pages
+    override suspend fun getPageList(chapter: SChapter): List<Page> = pageListParse(client.get(getChapterUrl(chapter), Fetch.DOCUMENT).asJsoup())
 
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
-        return document.select("img[data-src]")
-            .mapIndexed { index, img -> Page(index, imageUrl = img.attr("abs:data-src")) }
-    }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+    // First page in src, the lazy-loaded rest in data-src
+    open fun pageListParse(document: Document): List<Page> = document.select("img.js-page:not(noscript img), img.pages__img")
+        .mapIndexed { index, img -> Page(index, imageUrl = img.attrOrNull("abs:data-src") ?: img.absUrl("src")) }
 }

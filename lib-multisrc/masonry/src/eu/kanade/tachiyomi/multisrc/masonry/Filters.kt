@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.multisrc.masonry
 
 import eu.kanade.tachiyomi.source.model.Filter
+import kotlinx.serialization.Serializable
 
 abstract class SelectFilter(
     name: String,
@@ -12,30 +13,39 @@ abstract class SelectFilter(
     val selected get() = options[state].second
 }
 
-class SortFilter : SelectFilter("Sort by", sortFilterOptions) {
-    fun getUriPartIfNeeded(part: String) = when (part) {
-        "search" -> {
-            when (state) {
-                2 -> ""
-                else -> selected
-            }
-        }
+class OrderFilter :
+    SelectFilter(
+        "Order",
+        listOf(
+            "Any Order" to "0",
+            "Popular" to "popular",
+            "Newest" to "newest",
+        ),
+    )
 
-        "tag" -> {
-            when (state) {
-                0 -> ""
-                else -> selected
-            }
-        }
+class QualityFilter :
+    SelectFilter(
+        "Quality",
+        listOf(
+            "All Quality" to "0",
+            "HD" to "hd",
+        ),
+    )
 
-        else -> ""
-    }
+@Serializable
+class Tag(val name: String, val value: String)
+
+class TagCheckBox(name: String, val value: String) : Filter.CheckBox(name)
+
+class TagFilter(tags: List<Tag>) : Filter.Group<TagCheckBox>("Tags", tags.map { TagCheckBox(it.name, it.value) }) {
+    val selected get() = state.filter { it.state }.map { it.value }
 }
 
-private val sortFilterOptions = listOf(
-    Pair("Trending", "sort/trending"),
-    Pair("Newest", "sort/newest"),
-    Pair("Popular", "sort/popular"),
+// Same field order as the site's filter panel
+@Serializable
+class GridFilter(
+    val content: String,
+    val quality: String,
+    val label: String,
+    val ord: String,
 )
-
-class TagFilter(options: List<Pair<String, String>>) : SelectFilter("Tags", options)
