@@ -2,46 +2,78 @@
 
 package eu.kanade.tachiyomi.extension.id.Luvyaa
 
-import android.content.SharedPreferences
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.multisrc.mangathemesia.MangaThemesia
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.SChapter
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.model.SManga
+import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
+import keiyoushi.network.get
 import keiyoushi.utils.getPreferencesLazy
-import okhttp3.Response
-import java.text.SimpleDateFormat
-import java.util.Locale
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
+import org.jsoup.nodes.Document
 
-class Luvyaa :
-    MangaThemesia(
-        "Luvyaa",
-        "https://v4.luvyaa.co",
-        "id",
-        dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.US),
-    ),
+@Source
+abstract class Luvyaa :
+    MangaThemesia(),
     ConfigurableSource {
+    override val datePattern = "dd/MM/yyyy"
 
-    private val preferences: SharedPreferences by getPreferencesLazy()
+    override val seriesAuthorSelector = metaSelector("Author")
+    override val seriesArtistSelector = metaSelector("Artist")
+    override val seriesTypeSelector = metaSelector("Type")
+    override val seriesGenreSelector = ".mgen a"
+    override val seriesStatusSelector = ".kh-status .status-text"
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
+    private val preferences by getPreferencesLazy {
+        if (contains(PREF_HIDE_LOCKED_OLD)) edit().remove(PREF_HIDE_LOCKED_OLD).apply()
+    }
 
-        val lockedUrls = LOCKED_URLS_REGEX.find(document.toString())?.groupValues?.get(1)
+    // luvyaa.co redirects to the current domain, which answers the lookup with a Cloudflare challenge
+    override suspend fun fetchBaseUrls(client: OkHttpClient): List<String> = listOf(
+        client.newBuilder().followRedirects(false).build()
+            .get(HUB_URL, Fetch.DOCUMENT, ensureSuccess = false)
+            .use { it.header("Location")!! },
+    )
+
+    // Links from the site's earlier domains
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val base = baseUrl.toHttpUrl()
+        if (url.topPrivateDomain() != base.topPrivateDomain()) return null
+        return super.getMangaByUrl(url.newBuilder().scheme(base.scheme).host(base.host).build())
+    }
+
+    override fun searchMangaUrl(page: Int, query: String) = if (query.isNotEmpty()) {
+        baseUrl.toHttpUrl().newBuilder().apply {
+            addQueryParameter("s", query)
+            addQueryParameter("page", page.toString())
+        }
+    } else {
+        super.searchMangaUrl(page, query)
+    }
+
+    override fun chapterListParse(document: Document): List<SChapter> {
+        val base = baseUrl.toHttpUrl()
+        val lockedPaths = LOCKED_URLS_REGEX.find(document.toString())?.groupValues?.get(1)
             ?.split(",")
-            ?.map { it.trim().removeSurrounding("'").removeSurrounding("\"").replace("\\/", "/") }
+            ?.mapNotNull { url ->
+                url.trim().removeSurrounding("'").removeSurrounding("\"").replace("\\/", "/")
+                    .let(base::resolve)?.encodedPath?.trimEnd('/')
+            }
+            ?.toSet()
             .orEmpty()
 
-        val hideLocked = preferences.getBoolean(PREF_HIDE_LOCKED, false)
-
-        countViews(document)
+        val showLocked = preferences.getBoolean(PREF_SHOW_LOCKED, false)
 
         return document.select(super.chapterListSelector()).mapNotNull { element ->
             val chapter = super.chapterFromElement(element)
-            val isLocked = lockedUrls.any { it.endsWith(chapter.url) }
+            val isLocked = chapter.url.trimEnd('/') in lockedPaths
 
-            if (hideLocked && isLocked) return@mapNotNull null
+            if (isLocked && !showLocked) return@mapNotNull null
 
             chapter.apply {
                 if (isLocked) {
@@ -53,16 +85,20 @@ class Luvyaa :
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         SwitchPreferenceCompat(screen.context).apply {
-            key = PREF_HIDE_LOCKED
-            title = "Sembunyikan chapter terkunci"
-            summary = "Sembunyikan chapter yang memerlukan membership (VIP)"
+            key = PREF_SHOW_LOCKED
+            title = "Tampilkan chapter terkunci"
+            summary = "Chapter Early Access khusus member Premium, ditandai 🔒"
             setDefaultValue(false)
         }.also(screen::addPreference)
     }
 
-    companion object {
-        private const val PREF_HIDE_LOCKED = "pref_hide_locked_chapters"
+    private fun metaSelector(label: String) = ".meta-item:has(> .meta-label:matchesOwn(^$label$)) .meta-pill"
 
-        private val LOCKED_URLS_REGEX = """lockedUrls\s*=\s*\[(.*?)]""".toRegex()
+    companion object {
+        private const val HUB_URL = "https://luvyaa.co/"
+        private const val PREF_SHOW_LOCKED = "pref_show_locked_chapters"
+        private const val PREF_HIDE_LOCKED_OLD = "pref_hide_locked_chapters"
+
+        private val LOCKED_URLS_REGEX = """lockedUrls\s*=\s*\[([^\]]*)]""".toRegex()
     }
 }

@@ -1,11 +1,10 @@
 package eu.kanade.tachiyomi.multisrc.kemono
 
-import android.app.Application
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.multisrc.kemono.KemonoCreatorDto.Companion.serviceName
-import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.HttpException
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -13,60 +12,85 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
+import keiyoushi.network.Fetch
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.applicationContext
+import keiyoushi.utils.getIntOrNull
 import keiyoushi.utils.getPreferences
 import keiyoushi.utils.parseAs
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.Cache
 import okhttp3.CacheControl
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import okhttp3.brotli.BrotliInterceptor
-import rx.Observable
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 import java.io.File
-import java.lang.Thread.sleep
-import java.util.TimeZone
+import java.io.IOException
+import java.time.ZoneId
+import java.time.ZoneOffset
 import kotlin.math.min
 import kotlin.time.Duration.Companion.minutes
 
-open class Kemono(
-    override val name: String,
-    override val baseUrl: String,
-    override val lang: String = "all",
-) : HttpSource(),
+abstract class Kemono :
+    KeiSource(),
     ConfigurableSource {
+
     override val supportsLatest = true
 
-    override val client = network.client.newBuilder()
-        .addInterceptor { chain ->
-            val request = chain.request()
-            if (request.url.pathSegments.first() == "api") {
-                chain.proceed(request.newBuilder().header("Accept", "text/css").build())
-            } else {
-                chain.proceed(request)
-            }
+    override fun OkHttpClient.Builder.configureClient() = addInterceptor { chain ->
+        val request = chain.request()
+        if (request.url.pathSegments.first() == "api") {
+            chain.proceed(request.newBuilder().header("Accept", "text/css").build())
+        } else {
+            chain.proceed(request)
         }
-        .apply {
-            val index = networkInterceptors().indexOfFirst { it is BrotliInterceptor }
-            if (index >= 0) interceptors().add(networkInterceptors().removeAt(index))
-        }
+    }
+        .addInterceptor(::thumbnailFallbackInterceptor)
         .cache(
             Cache(
-                directory = File(Injekt.get<Application>().externalCacheDir, "network_cache_${name.lowercase()}"),
+                directory = File(applicationContext.externalCacheDir, "network_cache_${name.lowercase()}"),
                 maxSize = 50L * 1024 * 1024, // 50 MiB
             ),
         )
-        .rateLimit(1)
-        .build()
-
-    private val creatorsClient = client.newBuilder()
         .readTimeout(5.minutes)
-        .build()
+        .rateLimit(1)
 
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
+    // Full-size files redirect to the nX file servers, which are often unreachable;
+    // the thumbnail server still works, so fall back to it. Once they fail to connect, skip them
+    // for the rest of the session so every page doesn't wait for the connect timeout.
+    private var fileServersUnreachable = false
+
+    private fun thumbnailFallbackInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        if (request.url.pathSegments.first() != dataPath) return chain.proceed(request)
+
+        if (!fileServersUnreachable) {
+            try {
+                val response = chain.proceed(request)
+                if (response.isSuccessful) return response
+                response.close()
+            } catch (e: IOException) {
+                if (chain.call().isCanceled()) throw e
+                fileServersUnreachable = true
+            }
+        }
+
+        val thumbnailUrl = request.url.newBuilder()
+            .encodedPath("/thumbnail${request.url.encodedPath}")
+            .build()
+        return chain.proceed(request.newBuilder().url(thumbnailUrl).build())
+    }
 
     private val preferences = getPreferences()
 
@@ -74,31 +98,15 @@ open class Kemono(
 
     private val dataPath = "data"
 
-    private val imgCdnUrl = baseUrl.replace("//", "//img.")
+    private val imgCdnUrl get() = baseUrl.replace("//", "//img.")
 
-    private fun String.formatAvatarUrl(): String = removePrefix("https://").replaceBefore('/', imgCdnUrl)
+    override suspend fun getPopularManga(page: Int) = searchMangas(page, sortBy = "pop" to "desc")
 
-    override fun popularMangaRequest(page: Int) = throw UnsupportedOperationException()
+    override suspend fun getLatestUpdates(page: Int) = searchMangas(page, sortBy = "lat" to "desc")
 
-    override fun popularMangaParse(response: Response) = throw UnsupportedOperationException()
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList) = searchMangas(page, query, filters)
 
-    override fun latestUpdatesRequest(page: Int) = throw UnsupportedOperationException()
-
-    override fun latestUpdatesParse(response: Response) = throw UnsupportedOperationException()
-
-    override fun fetchPopularManga(page: Int): Observable<MangasPage> = Observable.fromCallable {
-        searchMangas(page, sortBy = "pop" to "desc")
-    }
-
-    override fun fetchLatestUpdates(page: Int): Observable<MangasPage> = Observable.fromCallable {
-        searchMangas(page, sortBy = "lat" to "desc")
-    }
-
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> = Observable.fromCallable {
-        searchMangas(page, query, filters)
-    }
-
-    private fun searchMangas(page: Int = 1, title: String = "", filters: FilterList? = null, sortBy: Pair<String, String> = "" to ""): MangasPage {
+    private suspend fun searchMangas(page: Int = 1, title: String = "", filters: FilterList? = null, sortBy: Pair<String, String> = "" to ""): MangasPage {
         var sort = sortBy
         val typeIncluded: MutableList<String> = mutableListOf()
         val typeExcluded: MutableList<String> = mutableListOf()
@@ -133,7 +141,7 @@ open class Kemono(
 
         val mangas = run {
             val favorites = if (fav != null) {
-                val response = client.newCall(GET("$baseUrl/$apiPath/account/favorites", headers)).execute()
+                val response = client.get("$baseUrl/$apiPath/account/favorites", Fetch.XHR, ensureSuccess = false)
 
                 if (response.isSuccessful) {
                     response.parseAs<List<KemonoFavoritesDto>>().filterNot { it.service.lowercase() == "discord" }
@@ -146,16 +154,11 @@ open class Kemono(
                 emptyList()
             }
 
-            val request = GET(
+            val response = client.get(
                 "$baseUrl/$apiPath/creators",
-                headers,
+                Fetch.XHR,
                 CacheControl.Builder().maxStale(30.minutes).build(),
             )
-            val response = creatorsClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                response.close()
-                throw Exception("HTTP error ${response.code}")
-            }
             val allCreators = response.parseAs<List<KemonoCreatorDto>>().filterNot { it.service.lowercase() == "discord" }
             allCreators.filter {
                 val includeType = typeIncluded.isEmpty() || typeIncluded.contains(it.service.serviceName().lowercase())
@@ -224,76 +227,108 @@ open class Kemono(
         return MangasPage(final, toIndex != maxIndex)
     }
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList) = throw UnsupportedOperationException()
-    override fun searchMangaParse(response: Response) = throw UnsupportedOperationException()
-
-    override fun fetchMangaDetails(manga: SManga): Observable<SManga> {
-        manga.thumbnail_url = manga.thumbnail_url!!.formatAvatarUrl()
-        return Observable.just(manga)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+        val segments = url.pathSegments.filter(String::isNotEmpty)
+        if (segments.size < 3 || segments[1] != "user") return null
+        val (service, _, user) = segments
+        return when {
+            segments.size == 3 -> fetchCreator(service, user).toSManga(imgCdnUrl)
+            segments.size == 5 && segments[3] == "post" -> {
+                val manga = SManga.create().apply { this.url = "/$service/user/$user/post/${segments[4]}" }
+                getMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
+            }
+            else -> null
+        }
     }
 
-    override fun mangaDetailsParse(response: Response) = throw UnsupportedOperationException()
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val segments = getMangaUrl(manga).toHttpUrl().pathSegments
+        val (service, _, user) = segments
+        val zone = zone(service)
+        if (segments.size == 3) {
+            if (fetchDetails) manga.thumbnail_url = "$imgCdnUrl/icons/$service/$user"
+            return SMangaUpdate(manga, if (fetchChapters) fetchChapterList(manga, zone, chapters) else chapters)
+        }
+        return coroutineScope {
+            val creator = if (fetchDetails) async { fetchCreator(service, user) } else null
+            val post = fetchPost(manga.url)
+            SMangaUpdate(
+                post.toSManga(creator?.await()?.name ?: manga.author, baseUrl, imgCdnUrl, zone),
+                if (post.images.isNotEmpty()) listOf(post.toSChapter(zone).apply { name = "Post" }) else emptyList(),
+            )
+        }
+    }
 
     override fun getChapterUrl(chapter: SChapter) = "$baseUrl${chapter.url.replace("$apiPath/", "")}"
 
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.fromCallable {
-        KemonoPostDto.dateFormat.timeZone = when (manga.author) {
-            "Pixiv Fanbox", "Fantia" -> TimeZone.getTimeZone("GMT+09:00")
-            else -> TimeZone.getTimeZone("GMT")
-        }
-        val prefMaxPost = preferences.getString(POST_PAGES_PREF, POST_PAGES_DEFAULT)!!
-            .toInt().coerceAtMost(POST_PAGES_MAX) * PAGE_POST_LIMIT
+    private suspend fun fetchCreator(service: String, user: String) = client.get("$baseUrl/$apiPath/$service/user/$user/profile", Fetch.XHR).parseAs<KemonoCreatorDto>()
+
+    private suspend fun fetchPost(path: String) = client.get("$baseUrl/$apiPath$path", Fetch.XHR).parseAs<KemonoPostDtoWrapped>().post
+
+    private fun zone(service: String) = when (service) {
+        "fanbox", "fantia" -> ZoneOffset.ofHours(9)
+        else -> ZoneOffset.UTC
+    }
+
+    private suspend fun fetchChapterList(manga: SManga, zone: ZoneId, chapters: List<SChapter>): List<SChapter> {
+        val pages = preferences.getString(POST_PAGES_PREF, POST_PAGES_DEFAULT)!!.toInt().coerceAtMost(POST_PAGES_MAX)
+        val fetchedPages = manga.memo.getIntOrNull(FETCHED_PAGES_MEMO) ?: 0
+        // Once the setting's pages are loaded, only the posts newer than the newest known one are; changing the setting
+        // reloads its pages, which also picks up imported posts kemono lists under their original date
+        val newOnly = fetchedPages == pages && chapters.isNotEmpty()
+        val known = chapters.mapTo(HashSet()) { it.url }
         var offset = 0
         var hasNextPage = true
         val result = ArrayList<SChapter>()
-        while (offset < prefMaxPost && hasNextPage) {
-            val request = GET("$baseUrl/$apiPath${manga.url}/posts?o=$offset", headers)
-            val page: List<KemonoPostDto> = retry(request).parseAs()
-            page.forEach { post -> if (post.images.isNotEmpty()) result.add(post.toSChapter()) }
+        val maxPages = if (newOnly) POST_PAGES_MAX else pages
+        while (hasNextPage && offset < maxPages * PAGE_POST_LIMIT) {
+            val page: List<KemonoPostDto> = retry("$baseUrl/$apiPath${manga.url}/posts?o=$offset").parseAs()
+            for (post in page) {
+                val chapter = post.toSChapter(zone)
+                if (newOnly && chapter.url in known) return result + chapters
+                if (post.images.isNotEmpty()) result.add(chapter)
+            }
             offset += PAGE_POST_LIMIT
             hasNextPage = page.size == PAGE_POST_LIMIT
         }
-        result
+        if (!newOnly) manga.memo = JsonObject(manga.memo + (FETCHED_PAGES_MEMO to JsonPrimitive(pages)))
+        // Known posts the loaded pages don't list
+        val loaded = result.mapTo(HashSet()) { it.url }
+        return result + chapters.filter { it.url !in loaded }
     }
 
-    private fun retry(request: Request): Response {
+    private suspend fun retry(url: String): Response {
         var code = 0
         repeat(5) {
-            val response = client.newCall(request).execute()
+            val response = client.get(url, Fetch.XHR, ensureSuccess = false)
             if (response.isSuccessful) return response
             response.close()
             code = response.code
             if (code == 429) {
-                sleep(10000)
+                delay(10000)
             }
         }
-        throw Exception("HTTP error $code")
+        throw HttpException(code)
     }
 
-    override fun chapterListParse(response: Response) = throw UnsupportedOperationException()
-
-    override fun pageListRequest(chapter: SChapter): Request = GET("$baseUrl/$apiPath${chapter.url}", headers)
-
-    override fun pageListParse(response: Response): List<Page> {
-        val postData: KemonoPostDtoWrapped = response.parseAs()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val postData: KemonoPostDtoWrapped = client.get("$baseUrl/$apiPath${chapter.url}", Fetch.XHR).parseAs()
         return postData.post.images.mapIndexed { i, path -> Page(i, imageUrl = "$baseUrl/$dataPath$path") }
     }
 
-    override fun imageRequest(page: Page): Request {
-        val imageUrl = page.imageUrl!!
+    override fun getImageRequest(page: Page): Request {
+        if (!preferences.getBoolean(USE_LOW_RES_IMG, false)) return super.getImageRequest(page)
 
-        if (!preferences.getBoolean(USE_LOW_RES_IMG, false)) return GET(imageUrl, headers)
-
-        val index = imageUrl.indexOf('/', 8)
-        val url = buildString {
-            append(imageUrl, 0, index)
-            append("/thumbnail")
-            append(imageUrl.substring(index))
-        }
-        return GET(url, headers)
+        val imageUrl = page.imageUrl!!.toHttpUrl()
+        val url = imageUrl.newBuilder().encodedPath("/thumbnail${imageUrl.encodedPath}").build()
+        return Request.Builder().url(url).headers(headers).build()
     }
-
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         ListPreference(screen.context).apply {
@@ -315,7 +350,7 @@ open class Kemono(
 
     // Filters
 
-    override fun getFilterList(): FilterList = FilterList(
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         SortFilter(
             "Sort by",
             Filter.Sort.Selection(0, false),
@@ -361,9 +396,10 @@ open class Kemono(
 
         private const val POST_PAGES_PREF = "POST_PAGES"
         private const val POST_PAGES_DEFAULT = "1"
-        private const val POST_PAGES_MAX = 75
+        private const val POST_PAGES_MAX = 200
 
-        // private const val BASE_URL_PREF = "BASE_URL"
+        private const val FETCHED_PAGES_MEMO = "fetchedPages"
+
         private const val USE_LOW_RES_IMG = "USE_LOW_RES_IMG"
     }
 }
