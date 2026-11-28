@@ -2,13 +2,17 @@ package eu.kanade.tachiyomi.multisrc.mccms
 
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import keiyoushi.utils.MarkdownDescription
+import keiyoushi.utils.tryParseDateTime
 import kotlinx.serialization.Serializable
 import org.jsoup.nodes.Entities
-import java.text.SimpleDateFormat
+import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.days
 
 @Serializable
-data class MangaDto(
+class MangaDto(
     private val id: String,
     private val name: String,
     private val pic: String,
@@ -24,12 +28,12 @@ data class MangaDto(
     fun toSManga() = SManga.create().apply {
         url = cleanUrl
         title = Entities.unescape(name)
-        author = Entities.unescape(this@MangaDto.author)
-        description = Entities.unescape(content)
-        genre = Entities.unescape(tags.joinToString())
+        author = this@MangaDto.author.ifEmpty { null }?.let(Entities::unescape)
+        description = MarkdownDescription.Builder().description(Entities.unescape(content)).build()
+        genre = tags.joinToString().ifEmpty { null }?.let(Entities::unescape)
         status = when (serialize) {
-            "连载", "連載中", "En cours", "OnGoing" -> SManga.ONGOING
-            "完结", "已完結", "Terminé", "Complete", "Complété" -> SManga.COMPLETED
+            "连载", "连载中", "連載中", "En cours", "OnGoing" -> SManga.ONGOING
+            "完结", "已完结", "已完結", "Terminé", "Complete", "Complété" -> SManga.COMPLETED
             else -> if (isUpdating(addtime)) SManga.ONGOING else SManga.UNKNOWN
         }
         thumbnail_url = "$pic#$id"
@@ -37,11 +41,9 @@ data class MangaDto(
     }
 
     companion object {
-        private val dateFormat by lazy { getDateFormat() }
-
         private fun isUpdating(dateStr: String): Boolean {
-            val date = dateFormat.parse(dateStr) ?: return false
-            return System.currentTimeMillis() - date.time <= 30L * 24 * 3600 * 1000 // a month
+            val date = DATE_FORMAT.tryParseDateTime(dateStr).takeIf { it != 0L } ?: return false
+            return Clock.System.now().toEpochMilliseconds() - date <= 30.days.inWholeMilliseconds
         }
     }
 }
@@ -57,14 +59,13 @@ class ChapterDto(val id: String, private val name: String, private val link: Str
 
 @Serializable
 class ChapterDataDto(val id: String, private val addtime: String) {
-    val date get() = dateFormat.parse(addtime)?.time ?: 0
-
-    companion object {
-        private val dateFormat by lazy { getDateFormat() }
-    }
+    val date get() = DATE_FORMAT.tryParseDateTime(addtime)
 }
 
 @Serializable
 class ResultDto<T>(val data: T)
 
-fun getDateFormat() = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ENGLISH)
+private val DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
+
+@Serializable
+class ImageListDto(val images: List<String>)

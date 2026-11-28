@@ -1,7 +1,9 @@
 package keiyoushi.utils
 
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.network.DEFAULT_CACHE_CONTROL
+import keiyoushi.network.Fetch
+import keiyoushi.network.get
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -10,7 +12,7 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Builder
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
-import okhttp3.Request
+import okhttp3.OkHttpClient
 import okhttp3.RequestBody
 import okhttp3.Response
 
@@ -48,6 +50,8 @@ private class PersistedQueryExtension(
 
 /**
  * Intercepts HTTP responses and throws [GraphQLException] if the body contains GraphQL errors.
+ *
+ * Runs before the `ensureSuccess` check of the suspend [graphQLGet] and `client.post`.
  */
 class GraphQLErrorInterceptor : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -159,11 +163,12 @@ inline fun <reified V : Any> Builder.appendGraphQLParams(
     operationName = operationName,
     variables = variables.toJsonElement(json),
     extensions = extensions,
-    json = jsonInstance,
+    json = json,
 )
 
 /**
- * Builds a GraphQL POST [Request].
+ * Executes a GraphQL GET request asynchronously, with the GraphQL parameters encoded as URL query
+ * parameters, and returns the response.
  *
  * @param url The endpoint URL.
  * @param headers The HTTP request headers.
@@ -171,107 +176,124 @@ inline fun <reified V : Any> Builder.appendGraphQLParams(
  * @param operationName The GraphQL operation name.
  * @param variables Variables pre-encoded as a [JsonElement].
  * @param extensions Optional protocol extensions.
- * @param cache The cache control strategy.
+ * @param cacheControl The cache control settings for the request.
+ * @param ensureSuccess If true, throws an exception if the response code is not 2xx.
  * @param json [Json] instance for serialization. Defaults to [jsonInstance].
+ * @param fetch How a browser would make the request, see [Fetch].
  * @see persistedQueryExtension
  */
-fun graphQLPost(
+suspend fun OkHttpClient.graphQLGet(
     url: String,
     headers: Headers,
     query: String? = null,
     operationName: String? = null,
     variables: JsonElement? = null,
     extensions: JsonElement? = null,
-    cache: CacheControl? = null,
+    cacheControl: CacheControl = DEFAULT_CACHE_CONTROL,
+    ensureSuccess: Boolean = true,
     json: Json = jsonInstance,
-): Request {
-    val body = graphQLBody(query, operationName, variables, extensions, json)
-    return if (cache != null) POST(url, headers, body, cache) else POST(url, headers, body)
-}
-
-/**
- * Typed-variables overload of [graphQLPost].
- *
- * Builds a GraphQL POST [Request].
- *
- * @param url The endpoint URL.
- * @param headers The HTTP request headers.
- * @param query The GraphQL query string.
- * @param operationName The GraphQL operation name.
- * @param variables Variables to serialize as [JsonElement] and embed in the request body.
- * @param extensions Optional protocol extensions.
- * @param cache The cache control strategy.
- * @param json [Json] instance for serialization. Defaults to [jsonInstance].
- * @see persistedQueryExtension
- */
-inline fun <reified V : Any> graphQLPost(
-    url: String,
-    headers: Headers,
-    query: String? = null,
-    operationName: String? = null,
-    variables: V,
-    extensions: JsonElement? = null,
-    cache: CacheControl? = null,
-    json: Json = jsonInstance,
-): Request = graphQLPost(url, headers, query, operationName, variables.toJsonElement(json), extensions, cache, json)
-
-/**
- * Builds a GraphQL GET [Request] with parameters encoded as URL query parameters.
- *
- * @param url The endpoint URL.
- * @param headers The HTTP request headers.
- * @param query The GraphQL query string.
- * @param operationName The GraphQL operation name.
- * @param variables Variables pre-encoded as a [JsonElement].
- * @param extensions Optional protocol extensions.
- * @param cache The cache control strategy.
- * @param json [Json] instance for serialization. Defaults to [jsonInstance].
- * @see persistedQueryExtension
- */
-fun graphQLGet(
-    url: String,
-    headers: Headers,
-    query: String? = null,
-    operationName: String? = null,
-    variables: JsonElement? = null,
-    extensions: JsonElement? = null,
-    cache: CacheControl? = null,
-    json: Json = jsonInstance,
-): Request {
-    val url = url.toHttpUrl().newBuilder()
-        .appendGraphQLParams(query, operationName, variables, extensions, json)
-        .build()
-    return if (cache != null) GET(url, headers, cache) else GET(url, headers)
-}
+    fetch: Fetch,
+): Response = get(
+    url.toHttpUrl().newBuilder().appendGraphQLParams(query, operationName, variables, extensions, json).build(),
+    headers,
+    fetch,
+    cacheControl,
+    ensureSuccess,
+)
 
 /**
  * Typed-variables overload of [graphQLGet].
  *
- * Builds a GraphQL GET [Request] with parameters encoded as URL query parameters.
+ * Executes a GraphQL GET request asynchronously, with the GraphQL parameters encoded as URL query
+ * parameters, and returns the response.
  *
  * @param url The endpoint URL.
  * @param headers The HTTP request headers.
  * @param query The GraphQL query string.
  * @param operationName The GraphQL operation name.
- * @param variables Variables to serialize as [JsonElement] and embed in the request body.
+ * @param variables Variables to serialize as [JsonElement] and embed in the request URL.
  * @param extensions Optional protocol extensions.
- * @param cache The cache control strategy.
+ * @param cacheControl The cache control settings for the request.
+ * @param ensureSuccess If true, throws an exception if the response code is not 2xx.
  * @param json [Json] instance for serialization. Defaults to [jsonInstance].
+ * @param fetch How a browser would make the request, see [Fetch].
  * @see persistedQueryExtension
  */
-inline fun <reified V : Any> graphQLGet(
+suspend inline fun <reified V : Any> OkHttpClient.graphQLGet(
     url: String,
     headers: Headers,
     query: String? = null,
     operationName: String? = null,
     variables: V,
     extensions: JsonElement? = null,
-    cache: CacheControl? = null,
+    cacheControl: CacheControl = DEFAULT_CACHE_CONTROL,
+    ensureSuccess: Boolean = true,
     json: Json = jsonInstance,
-): Request = graphQLGet(url, headers, query, operationName, variables.toJsonElement(json), extensions, cache, json)
+    fetch: Fetch,
+): Response = graphQLGet(url, headers, query, operationName, variables.toJsonElement(json), extensions, cacheControl, ensureSuccess, json, fetch)
 
 /**
- * Pass the result to the `extensions` parameter of [graphQLBody], [graphQLPost] or [graphQLGet].
+ * Executes a GraphQL GET request asynchronously and returns the response, with the GraphQL
+ * parameters encoded as URL query parameters and the headers of the [HttpSource] it is called
+ * from.
+ *
+ * @param url The endpoint URL.
+ * @param query The GraphQL query string.
+ * @param operationName The GraphQL operation name.
+ * @param variables Variables pre-encoded as a [JsonElement].
+ * @param extensions Optional protocol extensions.
+ * @param cacheControl The cache control settings for the request.
+ * @param ensureSuccess If true, throws an exception if the response code is not 2xx.
+ * @param json [Json] instance for serialization. Defaults to [jsonInstance].
+ * @param fetch How a browser would make the request, see [Fetch].
+ * @see persistedQueryExtension
+ */
+context(source: HttpSource)
+suspend fun OkHttpClient.graphQLGet(
+    url: String,
+    query: String? = null,
+    operationName: String? = null,
+    variables: JsonElement? = null,
+    extensions: JsonElement? = null,
+    cacheControl: CacheControl = DEFAULT_CACHE_CONTROL,
+    ensureSuccess: Boolean = true,
+    json: Json = jsonInstance,
+    fetch: Fetch,
+): Response = graphQLGet(url, source.headers, query, operationName, variables, extensions, cacheControl, ensureSuccess, json, fetch)
+
+/**
+ * Typed-variables overload of [graphQLGet].
+ *
+ * Executes a GraphQL GET request asynchronously and returns the response, with the GraphQL
+ * parameters encoded as URL query parameters and the headers of the [HttpSource] it is called
+ * from.
+ *
+ * @param url The endpoint URL.
+ * @param query The GraphQL query string.
+ * @param operationName The GraphQL operation name.
+ * @param variables Variables to serialize as [JsonElement] and embed in the request URL.
+ * @param extensions Optional protocol extensions.
+ * @param cacheControl The cache control settings for the request.
+ * @param ensureSuccess If true, throws an exception if the response code is not 2xx.
+ * @param json [Json] instance for serialization. Defaults to [jsonInstance].
+ * @param fetch How a browser would make the request, see [Fetch].
+ * @see persistedQueryExtension
+ */
+context(source: HttpSource)
+suspend inline fun <reified V : Any> OkHttpClient.graphQLGet(
+    url: String,
+    query: String? = null,
+    operationName: String? = null,
+    variables: V,
+    extensions: JsonElement? = null,
+    cacheControl: CacheControl = DEFAULT_CACHE_CONTROL,
+    ensureSuccess: Boolean = true,
+    json: Json = jsonInstance,
+    fetch: Fetch,
+): Response = graphQLGet(url, source.headers, query, operationName, variables.toJsonElement(json), extensions, cacheControl, ensureSuccess, json, fetch)
+
+/**
+ * Pass the result to the `extensions` parameter of [graphQLBody] or [graphQLGet].
  *
  * @param hash SHA-256 hash of the query string.
  * @param version APQ protocol version. Defaults to `1`.

@@ -2,19 +2,22 @@ package eu.kanade.tachiyomi.extension.id.komiktap
 
 import app.cash.quickjs.QuickJs
 import eu.kanade.tachiyomi.multisrc.mangathemesia.MangaThemesia
-import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
+import keiyoushi.utils.asJsoup
 import okhttp3.Cookie
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.asResponseBody
 import java.io.IOException
 
-class Komiktap : MangaThemesia("Komiktap", "https://komiktap.info", "id") {
+@Source
+abstract class Komiktap : MangaThemesia() {
 
-    override val client = super.client.newBuilder()
-        .addInterceptor(::sucuriInterceptor)
-        .addInterceptor { chain ->
+    override fun OkHttpClient.Builder.configureClient() = apply {
+        addInterceptor(::sucuriInterceptor)
+        addInterceptor { chain ->
             val response = chain.proceed(chain.request())
             val mime = response.headers["Content-Type"]
             if (response.isSuccessful) {
@@ -28,7 +31,7 @@ class Komiktap : MangaThemesia("Komiktap", "https://komiktap.info", "id") {
             }
             response
         }
-        .build()
+    }
 
     // Taken from es/ManhwasNet
     private fun sucuriInterceptor(chain: Interceptor.Chain): Response {
