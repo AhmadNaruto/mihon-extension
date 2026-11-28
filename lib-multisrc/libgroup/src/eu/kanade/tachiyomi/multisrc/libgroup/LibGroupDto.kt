@@ -3,14 +3,27 @@ package eu.kanade.tachiyomi.multisrc.libgroup
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import keiyoushi.utils.ratingStars
+import keiyoushi.utils.tryParse
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonTransformingSerializer
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
+import kotlin.time.Instant
+
+object SiteIdsSerializer : JsonTransformingSerializer<List<Int>>(ListSerializer(Int.serializer())) {
+    override fun transformDeserialize(element: JsonElement): JsonElement = when (element) {
+        is JsonObject -> JsonArray(element.values.filterIsInstance<JsonPrimitive>())
+        else -> element
+    }
+}
 
 @Serializable
 class Data<T>(
@@ -32,6 +45,7 @@ class Constants(
     class IdLabelSiteType(
         val id: Int,
         val label: String,
+        @Serializable(with = SiteIdsSerializer::class)
         @SerialName("site_ids") val siteIds: List<Int>,
     )
 
@@ -39,6 +53,7 @@ class Constants(
     class IdNameSiteType(
         val id: Int,
         val name: String,
+        @Serializable(with = SiteIdsSerializer::class)
         @SerialName("site_ids") val siteIds: List<Int>,
     )
 
@@ -47,6 +62,7 @@ class Constants(
         val id: String,
         val label: String,
         val url: String,
+        @Serializable(with = SiteIdsSerializer::class)
         @SerialName("site_ids") val siteIds: List<Int>,
     )
 
@@ -141,22 +157,8 @@ class Manga(
         status = parseStatus(isLicensed, scanlateStatus.label, this@Manga.status.label)
         genre = type.label.ifBlank { "Манга" } + ", " + ageRestriction.label + ", " +
             genres.joinToString { it.name.trim() } + ", " + tags.joinToString { it.name.trim() }
-        description = getOppositeLanguage(isEng, rusName, engName) + rating.average.parseAverage() + " " + rating.average +
+        description = getOppositeLanguage(isEng, rusName, engName) + ratingStars(rating.average.toDouble()) + " " + rating.average +
             " (голосов: " + rating.votes + ")\n" + otherNames.joinAltNames() + summary.parseSummary()
-    }
-
-    private fun Float.parseAverage(): String = when {
-        this > 9.5 -> "★★★★★"
-        this > 8.5 -> "★★★★✬"
-        this > 7.5 -> "★★★★☆"
-        this > 6.5 -> "★★★✬☆"
-        this > 5.5 -> "★★★☆☆"
-        this > 4.5 -> "★★✬☆☆"
-        this > 3.5 -> "★★☆☆☆"
-        this > 2.5 -> "★✬☆☆☆"
-        this > 1.5 -> "★☆☆☆☆"
-        this > 0.5 -> "✬☆☆☆☆"
-        else -> "☆☆☆☆☆"
     }
 
     private fun parseStatus(isLicensed: Boolean, statusTranslate: String, statusTitle: String): Int = when {
@@ -293,7 +295,7 @@ class Chapter(
             val branchStr = if (branchId != null) "&branch_id=$branchId" else ""
             url = "/$slugUrl/chapter?$branchStr&volume=$volume&number=$number"
             scanlator = getTeamName(branchId) ?: if (isScanUser) getUserName(branchId) else null
-            date_upload = runCatching { LibGroup.simpleDateFormat.parse(first(branchId)!!.createdAt)!!.time }.getOrDefault(0L)
+            date_upload = Instant.tryParse(first(branchId)?.createdAt)
             chapter_number = number.toFloat()
         }
     }

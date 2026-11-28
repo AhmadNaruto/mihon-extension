@@ -2,11 +2,17 @@ package eu.kanade.tachiyomi.extension.all.kagane
 
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import keiyoushi.utils.MarkdownDescription
+import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import java.text.SimpleDateFormat
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import org.jsoup.Jsoup
 import java.util.Locale
+import kotlin.time.Instant
 
 @Serializable
 class GenreDto(
@@ -28,7 +34,7 @@ class SourcesDto(
 )
 
 @Serializable
-data class SourceDto(
+class SourceDto(
     @SerialName("source_id") val sourceId: String,
     @SerialName("source_type") val sourceType: String, // "Official", "Unofficial", "Mixed"
     val title: String,
@@ -62,17 +68,18 @@ class SearchDto(
         val alternateTitles: List<String> = emptyList(),
     ) {
 
-        fun toSManga(domain: String, showSource: Boolean, sources: Map<String, String>): SManga = SManga.create().apply {
-            title = if (showSource) "${this@Book.title.trim()} [${sources[this@Book.sourceId]}]" else this@Book.title.trim()
+        fun toSManga(apiUrl: String, showSource: Boolean, sources: Map<String, String>, cleanTitle: Boolean): SManga = SManga.create().apply {
+            title = if (showSource && !sources.isEmpty()) "${this@Book.title.trim()} [${sources[this@Book.sourceId]}]" else this@Book.title.clean(cleanTitle)
             url = id
-            thumbnail_url = coverImage?.let { "$domain/api/v2/image/$it" }
+            thumbnail_url = coverImage?.let { "$apiUrl/image/$it" }
         }
     }
 }
 
 @Serializable
 class TrackerDto(
-    val series: List<Book> = emptyList(),
+    @SerialName("book_series")
+    val bookSeries: List<Book> = emptyList(),
 ) {
     @Serializable
     class Book(
@@ -86,25 +93,46 @@ class TrackerDto(
         val coverImage: String? = null,
     ) {
 
-        fun toSManga(domain: String, showSource: Boolean, sources: Map<String, String>): SManga = SManga.create().apply {
-            title = if (showSource) "${this@Book.title.trim()} [${sources[this@Book.sourceId]}]" else this@Book.title.trim()
+        fun toSManga(apiUrl: String, showSource: Boolean, sources: Map<String, String>, cleanTitle: Boolean): SManga = SManga.create().apply {
+            title = if (showSource && !sources.isEmpty()) "${this@Book.title.trim()} [${sources[this@Book.sourceId]}]" else this@Book.title.clean(cleanTitle)
             url = id
-            thumbnail_url = coverImage?.let { "$domain/api/v2/image/$it" }
+            thumbnail_url = coverImage?.let { "$apiUrl/image/$it" }
         }
     }
 }
 
 @Serializable
-class AlternateSeries(
-    @SerialName("current_books")
-    val booksCount: Int,
-    @SerialName("start_year")
-    val startYear: Int? = null,
-)
+class StaffSearchDto(
+    val content: List<Staff> = emptyList(),
+) {
+    @Serializable
+    class Staff(
+        @SerialName("staff_id")
+        val staffId: String,
+        val name: String,
+        @SerialName("native_name")
+        val nativeName: String? = null,
+        @SerialName("alternate_names")
+        val alternateNames: List<String> = emptyList(),
+    )
+}
+
+@Serializable
+class GroupSearchDto(
+    val items: List<Group> = emptyList(),
+) {
+    @Serializable
+    class Group(
+        @SerialName("group_id")
+        val groupId: String,
+        val title: String,
+    )
+}
 
 @Serializable
 class DetailsDto(
     val title: String,
+    val slug: String? = null,
     val description: String?,
     @SerialName("upload_status")
     val publicationStatus: String,
@@ -117,19 +145,48 @@ class DetailsDto(
     val tags: List<Tag> = emptyList(),
     @SerialName("series_alternate_titles")
     val seriesAlternateTitles: List<AlternateTitle> = emptyList(),
-    @SerialName("series_books")
-    val seriesBooks: List<ChapterDto.Book> = emptyList(),
     @SerialName("edition_info")
     val editionInfo: String? = null,
     @SerialName("tracker_id")
     val trackerId: String? = null,
+    @SerialName("series_links")
+    val seriesLinks: List<SeriesLink> = emptyList(),
+    @SerialName("average_rating")
+    val averageRating: Double? = null,
+    @SerialName("total_ratings")
+    val totalRatings: Int? = null,
     @SerialName("series_covers")
     val covers: List<SeriesCover> = emptyList(),
+    @SerialName("age_rating")
+    val ageRating: String? = null,
+    @SerialName("is_pornographic")
+    val isPornographic: Boolean? = null,
+    @SerialName("is_disturbing")
+    val isDisturbing: Boolean? = null,
+    @SerialName("original_language")
+    val originalLanguage: String? = null,
+    @SerialName("translated_language")
+    val translatedLanguage: String? = null,
+    @SerialName("start_year")
+    val startYear: Int? = null,
+    @SerialName("end_year")
+    val endYear: Int? = null,
+    @SerialName("current_volumes")
+    val currentVolumes: Int? = null,
+    @SerialName("total_views")
+    val totalViews: Long? = null,
+    @SerialName("subscriber_count")
+    val subscriberCount: Int? = null,
 ) {
     @Serializable
     class SeriesStaff(
+        @SerialName("staff_id")
+        val staffId: String,
         val name: String,
+        @SerialName("native_name")
+        val nativeName: String? = null,
         val role: String,
+        val priority: Int = 0,
     )
 
     @Serializable
@@ -156,52 +213,59 @@ class DetailsDto(
         val imageId: String,
     )
 
-    fun toSManga(domain: String, sourceName: String? = null, baseUrl: String = "", showEdition: Boolean = false, showSource: Boolean = false): SManga = SManga.create().apply {
+    @Serializable
+    class SeriesLink(
+        val url: String,
+        val label: String? = null,
+        val kind: String? = null,
+    )
+
+    fun toSManga(apiUrl: String, sourceName: String? = null, baseUrl: String = "", showEdition: Boolean = false, showSource: Boolean = false, showDetails: Boolean = false, cleanTitle: Boolean): SManga = SManga.create().apply {
         val base = this@DetailsDto.title.trim()
         val withEdition = if (showEdition && !this@DetailsDto.editionInfo.isNullOrBlank()) "$base (${this@DetailsDto.editionInfo})" else base
-        title = if (showSource && sourceName != null) "$withEdition [$sourceName]" else withEdition
-        thumbnail_url = covers.firstOrNull()?.imageId?.let { "$domain/api/v2/image/$it" }
-        val desc = StringBuilder()
+        title = if (showSource && sourceName != null) "$withEdition [$sourceName]" else withEdition.clean(cleanTitle)
+        thumbnail_url = covers.firstOrNull()?.imageId?.let { "$apiUrl/image/$it" }
 
-        // Add main description
-        this@DetailsDto.description?.takeIf { it.isNotBlank() }?.let {
-            desc.append(it.trim())
-            desc.append("\n")
-        }
+        val byAuthorRoles = seriesStaff.filter { it.roleIs(BOOK_CREATOR_ROLES) }
+        val byArtistRoles = seriesStaff.filter { it.roleIs(ARTIST_ROLES) }
 
-        // Add source name
-        if (sourceName != null && this@DetailsDto.sourceId != null) {
-            if (desc.isNotEmpty()) desc.append("\n")
-            desc.append("Source: [$sourceName]($baseUrl/sources/${this@DetailsDto.sourceId})\n")
-        }
+        description = MarkdownDescription.Builder().apply {
+            markdown(this@DetailsDto.description?.let { Jsoup.parse(it.trim().replace("\n", "<br>")).wholeText() })
 
-        // Add alternate titles at the end
-        if (seriesAlternateTitles.isNotEmpty()) {
-            if (desc.isNotEmpty()) desc.append("\n")
-            desc.append("Associated Name(s):\n")
-            seriesAlternateTitles.forEach {
-                desc.append("• ${it.title}\n")
+            if (showDetails) {
+                val originalName = originalLanguage?.let { LANGUAGE_NAMES[it] }
+                rating(averageRating?.div(10), votes = totalRatings)
+                field("Content Rating", ageRating?.toContentRating(isPornographic, isDisturbing))
+                field("Followers", subscriberCount?.takeIf { it > 0 }?.toLong()?.toCompactCount())
+                field("Format", format)
+                field("Original Language", originalName)
+                field("Translated Language", translatedLanguage?.let { LANGUAGE_NAMES[it] }?.takeIf { it != originalName })
+                field("Views", totalViews?.takeIf { it > 0 }?.toCompactCount())
+                field("Volumes", currentVolumes?.takeIf { it > 0 }?.toString())
+                field("Year", startYear?.takeIf { it > 0 }?.let { start -> endYear?.takeIf { it > start }?.let { "$start–$it" } ?: "$start" })
             }
-        }
 
-        // Extract authors and artists from staff (roles like "Author", "Artist", "Story", "Art")
-        val authors = seriesStaff.filter {
-            it.role.contains("Author", ignoreCase = true) || it.role.contains("Story", ignoreCase = true)
-        }.map { it.name }.distinct()
-        val artists = seriesStaff.filter {
-            it.role.contains("Artist", ignoreCase = true) || it.role.contains("Art", ignoreCase = true)
-        }
-            .map { it.name }
-            .distinct()
-            .joinToString(", ")
+            seriesStaff
+                .filter { !it.roleIs(BOOK_CREATOR_ROLES) && !it.roleIs(ARTIST_ROLES) }
+                .sortedBy { it.priority }
+                .groupBy { it.role }
+                .forEach { (role, members) -> field(role, members.map { it.name.displayWithNative(it.nativeName) }) }
 
-        artist = artists
-        author = authors.joinToString()
-        description = desc.toString().trim()
-        genre = buildList {
-            this@DetailsDto.format?.takeIf { it.isNotBlank() }?.let { add(it) }
-            addAll(genres.map { it.genreName })
-        }.joinToString()
+            if (sourceName != null && sourceId != null) links(listOf(sourceName to "$baseUrl/sources/$sourceId"), label = "Source")
+
+            if (showDetails) {
+                fun Collection<SeriesLink>.byLabel() = map { (it.label ?: it.url) to it.url }
+                links(seriesLinks.filter { it.kind == "Official" }.byLabel(), label = "Official Link(s)")
+                links(seriesLinks.filter { it.kind == "Tracker" }.byLabel(), label = "Tracker(s)")
+                links(seriesLinks.filter { it.kind != null && it.kind != "Official" && it.kind != "Tracker" }.byLabel(), label = "Other(s)")
+            }
+
+            altTitles(seriesAlternateTitles.map { it.title }, label = "Associated Name(s)")
+        }.build()
+
+        author = byAuthorRoles.sortedBy { it.priority }.distinctBy { it.staffId }.joinToString { it.name }
+        artist = byArtistRoles.sortedBy { it.priority }.distinctBy { it.staffId }.joinToString { it.name }
+        genre = genres.map { it.genreName }.joinToString()
         status = this@DetailsDto.publicationStatus.toStatus()
     }
 
@@ -211,6 +275,87 @@ class DetailsDto(
         "HIATUS" -> SManga.ON_HIATUS
         "ABANDONED" -> SManga.CANCELLED
         else -> SManga.UNKNOWN
+    }
+}
+
+private val LANGUAGE_NAMES = mapOf(
+    "en" to "English",
+    "ja" to "Japanese",
+    "ko" to "Korean",
+    "zh" to "Chinese",
+    "es" to "Spanish",
+    "es-419" to "Latin American Spanish",
+    "fr" to "French",
+    "de" to "German",
+    "pt" to "Portuguese",
+    "pt-BR" to "Brazilian Portuguese",
+    "ru" to "Russian",
+    "it" to "Italian",
+    "id" to "Indonesian",
+    "vi" to "Vietnamese",
+    "th" to "Thai",
+    "pl" to "Polish",
+    "hi" to "Hindi",
+    "ar" to "Arabic",
+)
+
+private val BOOK_CREATOR_ROLES = setOf("author", "story", "original creator")
+private val ARTIST_ROLES = setOf("artist", "art")
+
+private val CAMEL_CASE_WEIGHT = Regex("(?<!^)([A-Z])")
+
+private fun Long.toCompactCount(): String = when {
+    this >= 1_000_000_000 -> "%.1f".format(Locale.US, this / 1_000_000_000.0).removeSuffix(".0") + "B"
+    this >= 1_000_000 -> "%.1f".format(Locale.US, this / 1_000_000.0).removeSuffix(".0") + "M"
+    this >= 1_000 -> "%.1f".format(Locale.US, this / 1_000.0).removeSuffix(".0") + "K"
+    else -> toString()
+}
+
+private fun DetailsDto.SeriesStaff.roleIs(roles: Set<String>): Boolean = role.trim().lowercase() in roles
+
+private fun String.displayWithNative(native: String?): String = when {
+    native.isNullOrBlank() || native == this -> this
+    else -> "$this ($native)"
+}
+
+private fun String.toContentRating(isPornographic: Boolean?, isDisturbing: Boolean?): String {
+    val base = when (this) {
+        "Safe" -> "Safe"
+        "FifteenPlus" -> "Fifteen Plus"
+        "EighteenPlus" -> "Eighteen Plus"
+        else -> replace(CAMEL_CASE_WEIGHT, " $1").trim()
+    }
+    val flags = buildList {
+        if (isPornographic == true) add("Pornographic")
+        if (isDisturbing == true) add("Disturbing")
+    }
+    return if (flags.isEmpty()) base else "$base (${flags.joinToString(", ")})"
+}
+
+@Serializable
+class BookIndexDto(
+    private val count: Int,
+    private val fields: List<String>,
+    private val groups: List<ChapterDto.Group>,
+    private val books: List<List<JsonElement>>,
+) {
+    fun toBooks(): List<ChapterDto.Book> {
+        check(books.size == count) { "Incomplete Kagane chapter index" }
+        // The compact index declares its column order in fields.
+        return books.map { row ->
+            val values = fields.zip(row).toMap()
+            ChapterDto.Book(
+                id = values.getValue("book_id").parseAs<String>(),
+                title = values.getValue("title").parseAs<String>(),
+                createdAt = values.getValue("released_at").parseAs<Long?>()
+                    ?.let { Instant.fromEpochSeconds(it).toString() },
+                pagesCount = values.getValue("page_count").parseAs<Int>(),
+                number = values.getValue("sort_no").parseAs<Float>(),
+                chapterNo = values.getValue("chapter_no").parseAs<String?>(),
+                volumeNo = values.getValue("volume_no").parseAs<String?>(),
+                groups = values.getValue("group_ix").parseAs<List<Int>>().map { groups[it] },
+            )
+        }
     }
 }
 
@@ -238,14 +383,25 @@ class ChapterDto(
         val volumeNo: String?,
         val groups: List<Group> = emptyList(),
     ) {
-        fun toSChapter(actualSeriesId: String, useSourceChapterNumber: Boolean = false, chapterTitleMode: String = "optional"): SChapter = SChapter.create().apply {
-            url = "/series/$actualSeriesId/reader/$id"
+        fun toSChapter(seriesId: String, slug: String?, useSourceChapterNumber: Boolean = false, chapterTitleMode: String = "optional"): SChapter = SChapter.create().apply {
+            url = "/series/$seriesId/reader/$id"
+            memo = buildJsonObject {
+                slug?.takeIf { it.isNotBlank() }?.let { put("seriesSlug", it) }
+            }
             name = buildChapterName(chapterTitleMode)
-            date_upload = dateFormat.tryParse(createdAt)
+            date_upload = Instant.tryParse(createdAt)
             if (useSourceChapterNumber) {
                 chapter_number = number
             }
-            scanlator = groups.joinToString(", ") { it.title }
+            scanlator = buildString {
+                append(groups.joinToString(", ") { it.title })
+
+                // Extract group tags in chapter title
+                CHAPTER_GROUP_REGEX.matchEntire(METADATA_REGEX.replace(title.trim(), ""))?.let { match ->
+                    val groupTag = match.groups[1]?.value ?: match.groups[2]?.value
+                    groupTag?.let { append(" ($it)") }
+                }
+            }
         }
 
         private fun buildChapterName(mode: String = "optional"): String {
@@ -253,6 +409,7 @@ class ChapterDto(
             return when (mode) {
                 "optional" -> {
                     when {
+                        trimmedTitle.isEmpty() && chapterNo.isNullOrBlank() && !volumeNo.isNullOrBlank() -> buildChapterName("vol_chapter")
                         trimmedTitle.isEmpty() && !chapterNo.isNullOrBlank() -> "Ch.$chapterNo"
                         else -> trimmedTitle
                     }
@@ -260,19 +417,19 @@ class ChapterDto(
 
                 "always" -> {
                     when {
-                        chapterNo.isNullOrBlank() -> trimmedTitle
+                        chapterNo.isNullOrBlank() && !volumeNo.isNullOrBlank() -> buildChapterName("vol_chapter")
                         trimmedTitle.isEmpty() -> "Ch.$chapterNo"
                         else -> "Ch.$chapterNo $trimmedTitle"
                     }
                 }
 
-                "vol_chapter" -> {
+                "vol_chapter", "vol_local" -> {
                     val volPart = if (!volumeNo.isNullOrBlank()) "Vol.$volumeNo " else ""
                     val chPart = if (!chapterNo.isNullOrBlank()) "Ch.$chapterNo" else ""
                     val numPart = "$volPart$chPart".trim()
                     when {
                         numPart.isEmpty() -> trimmedTitle
-                        trimmedTitle.isEmpty() -> numPart
+                        trimmedTitle.isEmpty() || mode == "vol_local" -> numPart
                         else -> "$numPart $trimmedTitle"
                     }
                 }
@@ -286,9 +443,6 @@ class ChapterDto(
     class Group(
         val title: String,
     )
-    companion object {
-        val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.ENGLISH)
-    }
 }
 
 @Serializable
@@ -319,3 +473,14 @@ class IntegrityDto(
     val token: String,
     val exp: Long,
 )
+
+private val BRACKET_REGEX = Regex("""(\([^()]*\)|\[[^\[\]]*\])\s*$""")
+
+private val METADATA_REGEX = Regex("""(?:\s*\{[^{}]*\})+\s*$""")
+
+private val CHAPTER_GROUP_REGEX = Regex(
+    """^Chapter\s+.*(?:-\s*Volume\s+.*\(([^()]+)\)|\[([^\[\]]+)\])\s*$""",
+    RegexOption.IGNORE_CASE,
+)
+
+private fun String.clean(removeExtras: Boolean): String = if (removeExtras) this.replace(BRACKET_REGEX, "").trim() else this.trim()

@@ -1,89 +1,106 @@
 package eu.kanade.tachiyomi.extension.all.lunaranime
 
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.source.model.Filter
+import android.util.Base64
+import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
+import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
+import keiyoushi.source.SMangaUpdate
+import keiyoushi.utils.TURNSTILE_AREA
+import keiyoushi.utils.WebViewScope
+import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
-import okhttp3.Headers
+import keiyoushi.utils.runWebView
+import keiyoushi.utils.toJsonRequestBody
+import keiyoushi.utils.toJsonString
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
-import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import rx.Observable
-import java.security.MessageDigest
+import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
 
-class LunarAnime(override val lang: String, private val internalLang: String = lang) : HttpSource() {
-    private val apiurlHost by lazy { API_URL.toHttpUrl().host }
-    private val cdnurlHost by lazy { CDN_URL.toHttpUrl().host }
+@Source
+abstract class LunarAnime :
+    KeiSource(),
+    ConfigurableSource {
+    private val preferences by getPreferencesLazy()
 
-    override val name = "Lunar Manga"
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_AUTO_UNLOCK
+            title = "Auto-unlock with ad points"
+            summary = "Earn free ad points and unlock points-locked chapters automatically"
+            setDefaultValue(false)
+        }.let(screen::addPreference)
+    }
 
-    override val baseUrl = "https://lunaranime.ru"
+    override fun OkHttpClient.Builder.configureClient() = this
+        .addInterceptor(::authorize)
+        .addInterceptor(VeilInterceptor(CDN_HOST))
+        .rateLimit(2) { it.host == API_HOST }
+        .rateLimit(4) { it.host == CDN_HOST }
 
-    override val supportsLatest = true
+    private fun authorize(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val token = client.cookieJar.loadForRequest(request.url).firstOrNull { it.name == AUTHORIZATION }?.value
+        if (request.url.host != API_HOST || token == null) return chain.proceed(request)
+        return chain.proceed(request.newBuilder().header(AUTHORIZATION, token).build())
+    }
 
-    private val signer = LunarSigner(baseUrl, API_URL)
+    override suspend fun getPopularManga(page: Int): MangasPage = getSearchMangaList(page, "", SortFilter.POPULAR)
 
-    override val client: OkHttpClient = network.client.newBuilder()
-        .addInterceptor(signer.dpopInterceptor())
-        .addInterceptor { chain ->
-            val request = chain.request()
-            val url = request.url.toString()
-            if (url.contains("storage.lunaranime.ru")) {
-                val newRequest = request.newBuilder()
-                    .header("Referer", "$baseUrl/")
-                    .build()
-                chain.proceed(newRequest)
-            } else {
-                chain.proceed(request)
-            }
-        }
-        .rateLimit(2) { it.host == apiurlHost || it.host == cdnurlHost }
-        .build()
-
-    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-
-    private val crypto = LunarDecryptor(client, API_URL)
-
-    // ============================== Popular ===============================
-
-    override fun popularMangaRequest(page: Int): Request = searchMangaRequest(page, "", FilterList())
-
-    override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
-
-    // =============================== Latest ===============================
-
-    override fun latestUpdatesRequest(page: Int): Request {
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
         val url = API_URL.toHttpUrl().newBuilder().apply {
             addPathSegments("api/manga/recent")
             addQueryParameter("page", page.toString())
             addQueryParameter("limit", "30")
 
             if (lang != "all") {
-                addQueryParameter("language", internalLang)
+                addQueryParameter("language", lang)
             }
         }.build()
-        return GET(url.toString(), headers)
-    }
 
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val result = response.parseAs<LunarRecentResponse>()
+        val result = client.get(url, Fetch.XHR).parseAs<LunarRecentResponse>()
         return MangasPage(
-            mangas = result.mangas.map { it.toSManga() },
+            mangas = result.mangas.filter { it.slug.isNotEmpty() }.map { it.toSManga() },
             hasNextPage = (result.page * result.limit) < result.totalCount,
         )
     }
 
-    // =============================== Search ===============================
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = API_URL.toHttpUrl().newBuilder().apply {
             addPathSegments("api/manga/search")
             addQueryParameter("page", page.toString())
@@ -93,153 +110,315 @@ class LunarAnime(override val lang: String, private val internalLang: String = l
             }
 
             if (lang != "all") {
-                addQueryParameter("language", internalLang)
+                addQueryParameter("language", lang)
             }
 
             filters.forEach { filter ->
                 when (filter) {
-                    is StatusFilter -> filter.toValue()?.let { addQueryParameter("status", it) }
-                    is TypeFilter -> filter.toValue()?.let { addQueryParameter("country", it) }
-                    is LanguageFilter -> filter.toValue()?.let { addQueryParameter("language", it) }
-                    is YearFilter -> {
-                        val year = filter.state
-                        if (year.isNotBlank() && year.toIntOrNull() != null) {
-                            addQueryParameter("year", year)
-                        }
+                    is SortFilter -> {
+                        addQueryParameter("sort", filter.toUriPart())
+                        addQueryParameter("order", if (filter.state?.ascending == true) "asc" else "desc")
                     }
+                    is StatusFilter -> filter.toUriPart()?.let { addQueryParameter("status", it) }
+                    is TypeFilter -> filter.toUriPart()?.let { addQueryParameter("country", it) }
+                    is FormatFilter -> filter.toUriPart()?.let { addQueryParameter("format", it) }
+                    is ContentFilter -> filter.toUriPart()?.let { addQueryParameter("content", it) }
+                    is LanguageFilter -> filter.toUriPart()?.let { addQueryParameter("language", it) }
+                    is YearFilter -> filter.state.toIntOrNull()?.let { addQueryParameter("year", it.toString()) }
                     is GenreFilter -> {
-                        val genres = filter.toGenres()
-                        if (genres.isNotEmpty()) {
-                            addQueryParameter("genres", genres.joinToString(","))
-                        }
+                        filter.included.takeIf { it.isNotEmpty() }?.let { addQueryParameter("genres", it.joinToString(",")) }
+                        filter.excluded.takeIf { it.isNotEmpty() }?.let { addQueryParameter("exclude_genres", it.joinToString(",")) }
                     }
                     else -> {}
                 }
             }
-            addQueryParameter("sort", "relevance")
         }.build()
-        return GET(url.toString(), headers)
-    }
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        val result = response.parseAs<LunarSearchResponse>()
+        val result = client.get(url, Fetch.XHR).parseAs<LunarSearchResponse>()
         return MangasPage(
-            mangas = result.manga.map { it.toSManga() },
+            // The site lists blank placeholder rows
+            mangas = result.manga.filter { it.slug.isNotEmpty() }.map { it.toSManga() },
             hasNextPage = result.page < result.totalPages,
         )
     }
 
-    // =========================== Manga Details ============================
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+        val segments = url.pathSegments.filter { it.isNotEmpty() }
+        if (segments.size < 2 || segments[0] != "manga") return null
 
-    override fun getMangaUrl(manga: SManga): String = baseUrl + manga.url
+        val manga = SManga.create().apply { this.url = "/manga/${segments[1]}" }
+        return getMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
+    }
 
-    override fun mangaDetailsRequest(manga: SManga): Request {
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
         val slug = manga.url.substringAfterLast("/")
+
+        return coroutineScope {
+            val details = async { if (fetchDetails) fetchMangaDetails(slug) else manga }
+            val chapterList = async { if (fetchChapters) fetchChapterList(slug) else chapters }
+            SMangaUpdate(manga = details.await(), chapters = chapterList.await())
+        }
+    }
+
+    private suspend fun fetchMangaDetails(slug: String): SManga {
         val url = API_URL.toHttpUrl().newBuilder()
             .addPathSegments("api/manga/title")
             .addPathSegment(slug)
             .build()
-        return GET(url.toString(), headers)
+
+        return client.get(url, Fetch.XHR).parseAs<LunarMangaResponse>().manga.toSManga()
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val result = response.parseAs<LunarMangaResponse>()
-        return result.manga.toSManga().apply { initialized = true }
+    override val supportsRelatedMangas = true
+
+    override suspend fun fetchRelatedMangaList(manga: SManga): List<SManga> {
+        val url = API_URL.toHttpUrl().newBuilder()
+            .addPathSegments("api/manga")
+            .addPathSegment(manga.url.substringAfterLast("/"))
+            .addPathSegment("similar")
+            .addQueryParameter("limit", "18")
+            .build()
+        return client.get(url, Fetch.XHR).parseAs<LunarSimilarResponse>().data.map { it.toSManga() }
     }
 
-    // ============================== Chapters ==============================
+    override fun getChapterUrl(chapter: SChapter): String = (baseUrl + chapter.url).toHttpUrl().newBuilder()
+        .query(null)
+        .build()
+        .toString()
 
-    override fun getChapterUrl(chapter: SChapter): String {
-        val url = chapter.url.substringBefore("?")
-        return baseUrl + url
-    }
-
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.fromCallable {
-        val slug = manga.url.substringAfterLast("/")
-
+    private suspend fun fetchChapterList(slug: String): List<SChapter> {
         val passwordUrl = API_URL.toHttpUrl().newBuilder()
             .addPathSegments("api/manga/password/info")
             .addPathSegment(slug)
             .build()
-        val passwordRequest = GET(passwordUrl.toString(), headers)
-        val passwordInfo = client.newCall(passwordRequest).execute().parseAs<LunarPasswordInfoResponse>()
-
         val requestUrl = API_URL.toHttpUrl().newBuilder()
             .addPathSegments("api/manga")
             .addPathSegment(slug)
             .build()
-        val request = GET(requestUrl.toString(), headers)
+        val (passwordInfo, result) = coroutineScope {
+            val passwordInfo = async { client.get(passwordUrl, Fetch.XHR).parseAs<LunarPasswordInfoResponse>() }
+            val result = async { client.get(requestUrl, Fetch.XHR).parseAs<LunarChapterListResponse>() }
+            passwordInfo.await() to result.await()
+        }
 
-        val result = client.newCall(request).execute().parseAs<LunarChapterListResponse>()
-
-        result.data.filter {
-            lang == "all" || it.language == internalLang
+        return result.data.filter {
+            lang == "all" || it.language == lang
         }.map { chapter ->
             val isLocked = passwordInfo.hasSeriesPassword ||
                 passwordInfo.chapterPasswords.any {
                     it.chapterNumber == chapter.chapter && (it.language == null || it.language == chapter.language)
                 }
-            chapter.toSChapter(slug, isLocked)
+            chapter.toSChapter(slug, isLocked, showLanguage = lang == "all")
         }.reversed()
     }
 
-    override fun chapterListRequest(manga: SManga): Request = throw UnsupportedOperationException("Not used.")
-
-    override fun chapterListParse(response: Response): List<SChapter> = throw UnsupportedOperationException("Not used.")
-
-    // =============================== Pages ================================
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = Observable.fromCallable {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterUrl = (baseUrl + chapter.url).toHttpUrl()
-        val language = chapterUrl.queryParameter("lang") ?: "en"
         val (slug, chapterNumber) = chapterUrl.pathSegments.takeLast(2)
+        val language = chapterUrl.queryParameter("lang") ?: "en"
+        val script = "(${javaClass.getResource(READER_SCRIPT)!!.readText()})(${slug.toJsonString()}, ${chapterNumber.toJsonString()}, ${language.toJsonString()})"
 
-        // I see decryption is always required now
-        val decryptedImages = crypto.decryptChapterImages(chapterUrl.toString(), slug, chapterNumber, language)
-        decryptedImages.mapIndexed { index, imageUrl ->
-            Page(index, chapter.url, imageUrl)
+        val state = readerMutex.withLock { readerTab(chapterUrl.toString()).read(chapterUrl.toString(), script) }
+
+        val pages = when {
+            state.price != null -> {
+                if (!autoUnlock) {
+                    val balance = state.balance?.let { ", balance $it" }.orEmpty()
+                    error(
+                        "This chapter is unlocked with ad points (price ${state.price}$balance). " +
+                            "Turn on \"Auto-unlock with ad points\" in the extension settings, or unlock it in WebView.",
+                    )
+                }
+                unlock(slug, chapterNumber, language, state.price, state.balance ?: 0)
+                val unlocked = readerMutex.withLock { readerTab(chapterUrl.toString()).read(chapterUrl.toString(), script) }
+                unlocked.pages ?: error("Unlocked, but the chapter did not load. Open it in WebView.")
+            }
+            state.reason != null -> error(if ("account" in state.reason) LOGIN_MESSAGE else state.message ?: state.reason)
+            else -> state.pages.orEmpty()
+        }
+
+        return pages.mapIndexed { index, page ->
+            val url = page.url.toHttpUrl()
+            Page(index, imageUrl = url.newBuilder().fragment(page.veil?.let { url.resolve(it)?.toString() }).build().toString())
         }
     }
 
-    override fun pageListRequest(chapter: SChapter): Request = throw UnsupportedOperationException("Not used.")
-
-    override fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException("Not used.")
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException("Not used.")
-
-    override fun imageRequest(page: Page): Request {
-        val imageHeaders = headersBuilder()
-            .set("Referer", baseUrl + page.url)
-            .set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-            .build()
-        return GET(page.imageUrl!!, imageHeaders)
-    }
-
-    // ============================== Filters ===============================
-
-    override fun getFilterList(): FilterList {
-        val filters = mutableListOf<Filter<*>>(
-            StatusFilter(),
-            TypeFilter(),
-        )
-
-        if (lang == "all") {
-            filters.add(LanguageFilter())
+    private suspend fun unlock(slug: String, chapter: String, language: String, price: Int, balance: Int) {
+        var points = balance
+        var attempts = 0
+        while (points < price) {
+            if (attempts++ >= MAX_EARN_ATTEMPTS) error("Not enough ad points yet ($points of $price). Try again shortly.")
+            val earned = earnPoints()
+            if (earned == null || earned <= points) error("Could not earn ad points right now ($points of $price). Try again shortly.")
+            points = earned
         }
 
-        filters.addAll(
-            listOf(
-                YearFilter(),
-                GenreFilter(),
-            ),
-        )
-
-        return FilterList(filters)
+        val buyUrl = API_URL.toHttpUrl().newBuilder().addPathSegments("api/points-lock/buy").build()
+        val body = LunarBuyBody("manga", slug, chapter, language).toJsonRequestBody()
+        val result = client.post(buyUrl, Fetch.XHR, body, ensureSuccess = false).parseAs<LunarBuyResponse>()
+        if (!result.success) error(result.error ?: "Could not unlock this chapter")
     }
 
-    private fun String.sha256(): ByteArray = MessageDigest.getInstance("SHA-256").digest(toByteArray())
+    private suspend fun earnPoints(): Int? {
+        val grantUrl = baseUrl.toHttpUrl().newBuilder().addPathSegments("px/q").addQueryParameter("p", "1").build()
+        val grant = client.post(grantUrl, Fetch.XHR, "".toRequestBody(), ensureSuccess = false).use { response ->
+            if (!response.isSuccessful) return null
+            decodeGrant(response.body.string())
+        } ?: return null
+
+        val heartbeatUrl = API_URL.toHttpUrl().newBuilder().addPathSegments("api/presence/heartbeat").build()
+        val banked = client.post(heartbeatUrl, Fetch.XHR, LunarHeartbeatBody(grant).toJsonRequestBody(), ensureSuccess = false)
+            .use { it.isSuccessful }
+        if (!banked) return null
+
+        val pointsUrl = API_URL.toHttpUrl().newBuilder().addPathSegments("api/ads/points").build()
+        return client.get(pointsUrl, Fetch.XHR).parseAs<LunarAdPoints>().points
+    }
+
+    private fun decodeGrant(raw: String): String? {
+        val bytes = Base64.decode(raw.trim(), Base64.DEFAULT)
+        if (bytes.size < 4) return null
+        val decoded = CharArray(bytes.size) { i ->
+            val key = if (i < 4) 0 else bytes[(i - 4) % 4].toInt() and 0xFF
+            ((bytes[i].toInt() and 0xFF) xor key).toChar()
+        }
+        return GRANT_REGEX.find(String(decoded))?.value
+    }
+
+    private val readerMutex = Mutex()
+
+    private val tabScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    private var tab: ReaderTab? = null
+
+    private fun readerTab(url: String): ReaderTab = tab?.takeUnless { it.closed } ?: ReaderTab(url).also { tab = it }
+
+    // One reader tab, kept between chapters
+    private inner class ReaderTab(firstUrl: String) {
+        private val ready = CompletableDeferred<WebViewScope<Unit>>()
+
+        private var opened = false
+
+        @Volatile
+        private var navigations = 0
+
+        @Volatile
+        private var lastUsed = TimeSource.Monotonic.markNow()
+
+        @Volatile
+        private var failure: Throwable? = null
+
+        @Volatile
+        var closed = false
+            private set
+
+        init {
+            tabScope.launch {
+                try {
+                    runWebView<Unit>(TAB_TIMEOUT) {
+                        onPageStarted { navigations++ }
+                        poll(IDLE_TIMEOUT / 4) {
+                            if (lastUsed.elapsedNow() > IDLE_TIMEOUT) resolve(Unit)
+                        }
+                        loadUrl(firstUrl)
+                        ready.complete(this)
+                    }
+                } catch (e: Throwable) {
+                    failure = e
+                    ready.completeExceptionally(e)
+                } finally {
+                    closed = true
+                }
+            }
+        }
+
+        suspend fun read(url: String, script: String): LunarReaderState {
+            val scope = ready.await()
+            val before = if (opened) navigations else 0
+            if (opened) scope.evaluateJs("location.assign(${url.toJsonString()})")
+            opened = true
+
+            var deadline = TimeSource.Monotonic.markNow() + READ_TIMEOUT
+            var checkSince: TimeMark? = null
+            var shown = false
+            try {
+                while (true) {
+                    if (closed) throw failure as? IOException ?: IOException("The reader was closed, try again", failure)
+                    lastUsed = TimeSource.Monotonic.markNow()
+                    val state = if (navigations > before) scope.evaluate(script)?.parseAs<LunarReaderState?>() else null
+                    if (state != null && (state.pages != null || state.price != null || state.reason != null)) return state
+                    if (state?.check == true) {
+                        val since = checkSince ?: TimeSource.Monotonic.markNow().also { checkSince = it }
+                        if (since.elapsedNow() >= CHECK_GRACE) {
+                            if (!shown) deadline = TimeSource.Monotonic.markNow() + CHECK_TIMEOUT
+                            shown = withContext(Dispatchers.Main) { scope.showToUser(if (state.turnstile) TURNSTILE_AREA else state.area) }
+                            if (!shown) throw IOException("Open the chapter in WebView to pass the site's check")
+                        }
+                    } else if (state != null && shown) {
+                        scope.hideFromUser()
+                        shown = false
+                        checkSince = null
+                        deadline = TimeSource.Monotonic.markNow() + READ_TIMEOUT
+                    }
+                    if (deadline.hasPassedNow()) throw IOException("The chapter did not load, open it in WebView")
+                    delay(POLL_INTERVAL)
+                }
+            } finally {
+                if (shown) scope.hideFromUser()
+                scope.evaluateJs("location.replace('about:blank')")
+            }
+        }
+
+        private suspend fun WebViewScope<Unit>.evaluate(script: String): String? = withTimeoutOrNull(SCRIPT_TIMEOUT) {
+            suspendCancellableCoroutine { continuation -> evaluateJs(script) { continuation.resume(it) } }
+        }
+    }
+
+    override val supportsFilterFetching = true
+
+    override suspend fun fetchFilterData(): JsonElement {
+        val url = API_URL.toHttpUrl().newBuilder().addPathSegments("api/manga/search/facets").build()
+        return client.get(url, Fetch.XHR).parseAs<JsonElement>()
+    }
+
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
+        buildList {
+            add(SortFilter())
+            add(StatusFilter())
+            add(TypeFilter())
+            add(FormatFilter())
+            add(ContentFilter())
+            if (lang == "all") add(LanguageFilter())
+            add(YearFilter())
+            data?.parseAs<LunarFacetsDto>()?.tags?.takeIf { it.isNotEmpty() }?.let { tags -> add(GenreFilter(tags.map { it.name })) }
+        },
+    )
 
     companion object {
-        private const val API_URL = "https://api.lunaranime.ru"
-        private const val CDN_URL = "https://storage.lunaranime.ru"
+        private const val API_HOST = "api.lunarx.to"
+        private const val API_URL = "https://$API_HOST"
+        private const val LOGIN_MESSAGE = "Log in via WebView to read chapters"
+        private const val CDN_HOST = "vault.lunarx.to"
+        private const val READER_SCRIPT = "/assets/lunar-reader.js"
+        private val TAB_TIMEOUT = 24.hours
+        private val IDLE_TIMEOUT = 30.minutes
+        private val READ_TIMEOUT = 60.seconds
+        private val CHECK_TIMEOUT = 3.minutes
+        private val CHECK_GRACE = 5.seconds
+        private val POLL_INTERVAL = 500.milliseconds
+        private val SCRIPT_TIMEOUT = 5.seconds
+
+        private const val AUTHORIZATION = "Authorization"
+        private const val PREF_AUTO_UNLOCK = "auto_unlock_points"
+        private const val MAX_EARN_ATTEMPTS = 3
+        private val GRANT_REGEX = Regex("""[0-9]{13}\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{43}""")
     }
+
+    private val autoUnlock get() = preferences.getBoolean(PREF_AUTO_UNLOCK, false)
 }
